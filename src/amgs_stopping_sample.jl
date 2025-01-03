@@ -1,0 +1,470 @@
+# write a functions step and step_warmup which are used in the AMGS_Stopping_sampler.
+
+# Start by defining the sampler
+# Note added the stopping conditions as parameters to the sampler
+# The max number of steps where adaptation occurs, the lower and upper bounds of the acceptance rate to check at each average interval
+struct AMGS_Stopping_Sampler{space, T_accep <: Real, T_conv_step <: Real, T_adapt_period <: Integer, T_accep_l <: Real, T_accep_u <: Real, T_accep_interval <: Integer} <: AbstractMCMC.AbstractSampler
+    acceptance_rate::T_accep
+    convergence_step::T_conv_step
+    max_adapt_period::T_adapt_period
+    lower_stopping_accep::T_accep_l
+    upper_stopping_accep::T_accep_u
+    average_interval::T_accep_interval
+end
+
+function AMGS_Stopping_Sampler(
+    acceptance_rate::T1,
+    convergence_step::T2,
+    max_adapt_period::T3,
+    lower_stopping_accep::T4,
+    upper_stopping_accep::T5,
+    average_interval::T6,
+    space::Tuple;
+) where {T1 <: Real, T2 <: Real, T3 <: Integer, T4 <: Real, T5 <: Real, T6 <: Integer}
+    return AMGS_Stopping_Sampler{space, T1, T2, T3, T4, T5, T6}(acceptance_rate, convergence_step, max_adapt_period, lower_stopping_accep, upper_stopping_accep, average_interval)
+end
+
+function AMGS_Stopping_Sampler(
+    acceptance_rate::T1,
+    convergence_step::T2,
+    max_adapt_period::T3,
+    lower_stopping_accep::T4,
+    upper_stopping_accep::T5,
+    average_interval::T6,
+    space::Symbol...;
+) where {T1 <: Real, T2 <: Real, T3 <: Integer, T4 <: Real, T5 <: Real, T6 <: Integer}
+    return AMGS_Stopping_Sampler(acceptance_rate, convergence_step, max_adapt_period, lower_stopping_accep, upper_stopping_accep, average_interval, space;)
+end
+
+# struct AMGS_Stopping_Sampler{space, T_accep <: Real, T_conv_step <: Real, T_adapt_period <: Integer, T_accep_l <: Real, T_accep_u <: Real, T_accep_interval <: Union{Integer, Missing}} <: AbstractMCMC.AbstractSampler
+#     acceptance_rate::T_accep
+#     convergence_step::T_conv_step
+#     max_adapt_period::T_adapt_period
+#     lower_stopping_accep::T_accep_l
+#     upper_stopping_accep::T_accep_u
+#     average_interval::T_accep_interval
+# end
+
+# function AMGS_Stopping_Sampler(
+#     acceptance_rate::T1,
+#     convergence_step::T2,
+#     max_adapt_period::T3,
+#     lower_stopping_accep::T4,
+#     upper_stopping_accep::T5,
+#     average_interval::Union{T6, Missing},
+#     space::Tuple,
+#     ::Type{T6}=Int64;
+# ) where {T1 <: Real, T2 <: Real, T3 <: Integer, T4 <: Real, T5 <: Real, T6 <: Integer}
+#     return AMGS_Stopping_Sampler{space, T1, T2, T3, T4, T5, Union{T6, Missing}}(acceptance_rate, convergence_step, max_adapt_period, lower_stopping_accep, upper_stopping_accep, average_interval)
+# end
+
+# function AMGS_Stopping_Sampler(
+#     acceptance_rate::T1,
+#     convergence_step::T2,
+#     max_adapt_period::T3,
+#     lower_stopping_accep::T4,
+#     upper_stopping_accep::T5,
+#     average_interval::Union{T6, Missing},
+#     ::Type{T6}=Int64,
+#     space::Symbol...;
+# ) where {T1 <: Real, T2 <: Real, T3 <: Integer, T4 <: Real, T5 <: Real, T6 <: Integer}
+#     return AMGS_Stopping_Sampler(acceptance_rate, convergence_step, max_adapt_period, lower_stopping_accep, upper_stopping_accep, average_interval, space...)
+# end
+
+
+DynamicPPL.getspace(::AMGS_Stopping_Sampler{space, <: Any, <: Any, <: Any, <: Any, <: Any}) where {space} = space
+
+# Define the state of the sampler
+# Contains Important quantities for computation of the updated kernel
+# In addition to the AMGSState, we also store the previous accepts as well as whether to adaptation has ended
+struct AMGSStoppingState{
+    TTrans<:AdvancedMH.Transition,
+    Tμ<:Vector,
+    TKernel<:Matrix,
+    TStep<:Integer,
+    Tβ<:Real,
+    TΔi<:Vector
+}
+    transition::TTrans
+    μ::Tμ
+    kernel::TKernel
+    step::TStep
+    β::Tβ
+    Δi::TΔi
+    stopped::Bool
+end
+
+
+# Define the initial state of the sampler
+function init_AMGSStoppingState(
+    transition::T_trans,
+    μ::Vector{T_μ},
+    kernel::T_kernel,
+    sampler::Turing.Sampler{<:AMGS_Stopping_Sampler}
+) where {T_trans <: AdvancedMH.AbstractTransition, T_μ <: Real, T_kernel <: Matrix}
+    ## copy vector length of mu and initialise zero vector for beta
+    step = 1
+    β =  zero(eltype(μ))
+    Δi = zeros(eltype(μ), sampler.alg.average_interval)
+
+    AMGSStoppingState{T_trans, Vector{T_μ}, T_kernel, Int, typeof(β), typeof(Δi)}(transition, μ, kernel, step, β, Δi, false)
+end
+
+# Define the initial state of the sampler in a 1D case
+function init_AMGSStoppingState(
+    transition::T_trans,
+    μ::T_μ,
+    kernel::T_kernel,
+    sampler::Turing.Sampler{<:AMGS_Stopping_Sampler}
+) where {T_trans <: AdvancedMH.AbstractTransition, T_μ <: Real, T_kernel <: Matrix}
+    ## copy vector length of mu and initialise zero vector for beta
+    step = 1
+    β =  zero(typeof(μ))
+    μ = [μ]
+    AMGSStoppingState{T_trans, T_μ, T_kernel, Int, typeof(β)}(transition, μ, kernel, step, β, sampler, false)
+end
+
+# Write a function which updates the kernel
+function update_kernel(state::AMGSStoppingState, trans::T, spl::Sampler{<:AMGS_Stopping_Sampler}, prob::T3) where {T <: AdvancedMH.Transition, T3 <: Real}
+    Σ = state.kernel
+    μ = state.μ
+    step = state.step
+    β = state.β
+    η = (step+1.0)^(-spl.alg.convergence_step)
+    β = β + η * (prob - spl.alg.acceptance_rate)
+    Δ = trans.params[spl] - μ
+    μ = (1.0-η) * μ + (η * trans.params[spl])
+    Σ = (1.0-η) * Σ + (η * (Δ * (Δ')))
+    new_state = AMGSStoppingState(trans, μ, Σ, step + 1, β, state.Δi, state.stopped)
+    return new_state
+end
+
+# Define a function which proposes a new set of parameters
+# function proposewalk(rng::Random.AbstractRNG, θ::AbstractVector, Σ::AbstractMatrix)
+#     return rand(rng, MvNormal(θ, Σ))
+# end
+
+# Write a function which checks whether to accept a new set of parameters
+mh_accept_logdens(rng::T, s_prime::T2, s::T2) where {T <:AbstractRNG, T2 <: Real} = -randexp(rng) < min(1e-6, s_prime - s)
+
+# Write a function which proposes a new set of parameters
+function propose_amgs(
+    rng::AbstractRNG,
+    vi::AbstractVarInfo,
+    model::AbstractMCMC.AbstractModel,
+    spl::Sampler{<:AMGS_Stopping_Sampler},
+    Σ::AbstractMatrix
+)
+    θ = vi[spl]
+
+    proposal = proposewalk(rng, θ, Σ)
+
+    new_ldf = Base.Fix1(
+        Turing.LogDensityProblems.logdensity,
+        Turing.LogDensityFunction(
+            model,
+            vi,
+            DynamicPPL.SamplingContext(rng, spl, DynamicPPL.leafcontext(model.context))
+        )
+    )
+
+    lp_proposal = new_ldf(proposal)
+
+    vi = DynamicPPL.unflatten(vi,
+           DynamicPPL.SamplingContext(rng, spl, DynamicPPL.leafcontext(model.context)),
+           proposal)
+
+    return setlogp!!(vi, lp_proposal)
+end
+
+# Write a function which initialises the chain where there are warmup steps
+function AbstractMCMC.step_warmup(
+    rng::AbstractRNG,
+    model::AbstractMCMC.AbstractModel,
+    spl::Sampler{<:AMGS_Stopping_Sampler};
+    kwargs...,
+)
+    # If we're doing random walk with a covariance matrix,
+    # just link everything before sampling.
+    vis = VarInfo()
+    spl_init = DynamicPPL.initialsampler(spl)
+    model(rng, vis, spl_init)
+
+    DynamicPPL.link!!(vis, spl, model)
+
+    lp_old = getlogp(vis)
+    prev_transition = AdvancedMH.Transition(vis, lp_old, false)
+
+    theta = vis[spl]
+    Σ = 0.01 .* abs.(diagm(theta)) + (1e-6 * I)
+
+    vis = propose_amgs(rng, vis, model, spl, Σ)
+    lp_proposal = getlogp(vis)
+
+    accep = mh_accept_logdens(rng, lp_proposal, lp_old)
+    if !accep
+        return prev_transition, init_AMGSStoppingState(prev_transition, theta, Σ, spl)
+    end
+    trans = AdvancedMH.Transition(vis, lp_proposal, true)
+    state = init_AMGSStoppingState(trans, theta, Σ, spl)
+
+    return trans, state
+end
+
+function AbstractMCMC.step_warmup(
+    rng::AbstractRNG,
+    model::AbstractMCMC.AbstractModel,
+    spl::Sampler{<:AMGS_Stopping_Sampler},
+    state::AMGSStoppingState;
+    kwargs...
+)
+    vis = state.transition.params
+    lp_old = getlogp(vis)
+
+    prev_transition = AdvancedMH.Transition(vis, lp_old, false)
+
+    Σ = state.kernel
+
+    vis = propose_amgs(rng, vis, model, spl, Σ)
+    lp_proposal = getlogp(vis)
+
+    accep = mh_accept_logdens(rng, lp_proposal, lp_old)
+    if !accep
+        new_state = AMGSStoppingState(prev_transition, state.μ, Σ, state.step, state.β, state.Δi, state.stopped)
+        return prev_transition, state
+    end
+
+    trans = AdvancedMH.Transition(vis, lp_proposal, true)
+    new_state = AMGSStoppingState(trans, state.μ, Σ, state.step, state.β, state.Δi, state.stopped)
+
+    return trans, new_state
+end
+
+function AbstractMCMC.step(
+    rng::AbstractRNG,
+    model::DynamicPPL.Model,
+    spl::Sampler{<:AMGS_Stopping_Sampler};
+    kwargs...,
+)
+    # If we're doing random walk with a covariance matrix,
+    # just link everything before sampling.
+
+    vis = VarInfo()
+    spl_init = DynamicPPL.initialsampler(spl)
+    model(rng, vis, spl_init)
+
+    DynamicPPL.link!!(vis, spl, model)
+
+    lp_old = getlogp(vis)
+    prev_transition = AdvancedMH.Transition(vis, lp_old, false)
+
+    theta = vis[spl]
+    Σ = 0.01 .* abs.(diagm(theta)) + (1e-6 * I)
+
+    vis = propose_amgs(rng, vis, model, spl, Σ)
+    lp_proposal = getlogp(vis)
+
+    accep = mh_accept_logdens(rng, lp_proposal, lp_old)
+
+    if !accep
+        new_trans = prev_transition
+    else
+        new_trans = AdvancedMH.Transition(vis, lp_proposal, true)
+    end
+
+    new_state = init_AMGSStoppingState(new_trans, theta, Σ, spl)
+
+    
+    if accep && AMGS_Stopping_Sampler.average_interval >= 1
+        # (Want to update only the Δi[1] element as we can guarantee adaptation has started as long as the averaging interval is greater than 0)
+        new_state_Δi = copy(new_state.Δi)
+        new_state_Δi[1] = 1
+        new_state = AMGSStoppingState(new_state.transition, new_state.μ, new_state.kernel, new_state.step, new_state.β, new_state_Δi, new_state.stopped)
+    end
+
+    prob = exp(min(0.0,-(lp_proposal - lp_old)))
+    upd_state = update_kernel(new_state, new_trans, spl, prob)
+
+    return new_trans, upd_state
+end
+
+
+#TODO Add a case for when the averaging interval is Inf
+function AbstractMCMC.step(
+    rng::AbstractRNG,
+    model::AbstractMCMC.AbstractModel,
+    spl::Sampler{<:AMGS_Stopping_Sampler},
+    state::AMGSStoppingState;
+    kwargs...,
+)
+    # If we're doing random walk with a covariance matrix,
+    # just link everything before sampling.
+    vis = state.transition.params
+    lp_old = getlogp(vis)
+    prev_transition = AdvancedMH.Transition(vis, lp_old, false)
+
+    theta = vis[spl]
+
+    vis = propose_amgs(rng, vis, model, spl, exp(state.β) * state.kernel)
+    lp_proposal = getlogp(vis)
+
+    accep = mh_accept_logdens(rng, lp_proposal, lp_old)
+
+    if !accep
+        new_trans = prev_transition
+    else
+        new_trans = AdvancedMH.Transition(vis, lp_proposal, true)
+    end
+
+    upd_Δi = vcat(state.Δi[2:end], [accep])
+    
+
+    prob = exp(min(0.0,(lp_proposal - lp_old)))
+
+    stopped = state.stopped || (spl.alg.average_interval == 0) ||
+        (state.step + 1>= spl.alg.max_adapt_period) ||
+        ifelse(ismissing(spl.alg.average_interval), false, ((sum(upd_Δi) / spl.alg.average_interval <= spl.alg.upper_stopping_accep) &&
+            (sum(upd_Δi) / spl.alg.average_interval >= spl.alg.lower_stopping_accep) &&
+            (((state.step + 1) % spl.alg.average_interval) == 0)))
+
+    new_state = AMGSStoppingState(new_trans, state.μ, state.kernel, state.step, state.β, upd_Δi, stopped)
+
+    if !new_state.stopped
+        new_state = update_kernel(new_state, new_trans, spl, prob)
+    end
+
+    return new_trans, new_state
+
+end
+
+function DynamicPPL.assume(
+    rng::Random.AbstractRNG, spl::Turing.Sampler{<:AMGS_Stopping_Sampler}, dist::Distribution, vn::T_VN, vi
+) where {T_VN <: Turing.VarName}
+    DynamicPPL.updategid!(vi, vn, spl)
+    return DynamicPPL.assume(dist, vn, vi)
+end
+
+
+function DynamicPPL.dot_assume(
+    rng,
+    spl::Turing.Sampler{<:AMGS_Stopping_Sampler},
+    dist::MultivariateDistribution,
+    vns::AbstractVector{<:Turing.VarName},
+    var::AbstractMatrix,
+    vi,
+)
+    DynamicPPL.updategid!.(Ref(vi), vns, Ref(spl))
+    return DynamicPPL.dot_assume(dist, var, vns, vi)
+end
+
+function DynamicPPL.dot_assume(
+    rng,
+    spl::Turing.Sampler{<:AMGS_Stopping_Sampler},
+    dists::Union{Distribution,AbstractArray{<:Distribution}},
+    vns::AbstractArray{<:Turing.VarName},
+    var::AbstractArray,
+    vi,
+)
+    # Just defer to `SampleFromPrior`.
+   DynamicPPL.updategid!.(Ref(vi), vns, Ref(spl))
+    return DynamicPPL.dot_assume(dists, var, vns, vi)
+end
+
+function DynamicPPL.observe(spl::Turing.Sampler{<:AMGS_Stopping_Sampler}, d::Distribution, value, vi)
+    return DynamicPPL.observe(d, value, vi)
+end
+
+function DynamicPPL.dot_observe(
+    spl::Turing.Sampler{<:AMGS_Stopping_Sampler},
+    ds::Union{Distribution,AbstractArray{<:Distribution}},
+    value::AbstractArray,
+    vi,
+)
+    return DynamicPPL.dot_observe(ds, value, vi)
+end
+
+getlogevidence(transitions, sampler, state) = missing
+
+function _params_to_array(model::DynamicPPL.Model, ts::Vector)
+    names_set = OrderedSet{VarName}()
+    # Extract the parameter names and values from each transition.
+    dicts = map(ts) do t
+        nms_and_vs = Turing.Inference.getparams(model, t.params)
+        nms = map(first, nms_and_vs)
+        vs = map(last, nms_and_vs)
+        for nm in nms
+            push!(names_set, nm)
+        end
+        # Convert the names and values to a single dictionary.
+        return OrderedDict(zip(nms, vs))
+    end
+    names = collect(names_set)
+    vals = [
+        get(dicts[i], key, missing) for i in eachindex(dicts), (j, key) in enumerate(names)
+    ]
+
+    return names, vals
+end
+
+
+function AbstractMCMC.bundle_samples(
+    ts::Vector{<:AdvancedMH.AbstractTransition},
+    model::AbstractMCMC.AbstractModel,
+    spl::Turing.Sampler{<:AMGS_Stopping_Sampler},
+    state,
+    chain_type::Type{MCMCChains.Chains};
+    save_state=false,
+    stats=missing,
+    sort_chain=false,
+    include_varname_to_symbol=true,
+    discard_initial=0,
+    thinning=1,
+    kwargs...,
+)
+    # Convert transitions to array format.
+    # Also retrieve the variable names.
+    varnames, vals = _params_to_array(model, ts)
+    varnames_symbol = map(Symbol, varnames)
+
+    # Get the values of the extra parameters in each transition.
+    extra_params, extra_values = Turing.Inference.get_transition_extras(map(x -> x.params, ts))
+
+    # Extract names & construct param array.
+    nms = [varnames_symbol; extra_params]
+    parray = hcat(vals, extra_values)
+
+    # Get the average or final log evidence, if it exists.
+    le = getlogevidence(ts, spl, state)
+
+    # Set up the info tuple.
+    info = NamedTuple()
+
+    if include_varname_to_symbol
+        info = merge(info, (varname_to_symbol=OrderedDict(zip(varnames, varnames_symbol)),))
+    end
+
+    if save_state
+        info = merge(info, (model=model, sampler=spl, samplerstate=state))
+    end
+
+    # Merge in the timing info, if available
+    if !ismissing(stats)
+        info = merge(info, (start_time=stats.start, stop_time=stats.stop))
+    end
+
+    # Conretize the array before giving it to MCMCChains.
+    parray = MCMCChains.concretize(parray)
+
+    # Chain construction.
+    chain = MCMCChains.Chains(
+        parray,
+        nms,
+        (internals=extra_params,);
+        evidence=le,
+        info=info,
+        start=discard_initial + 1,
+        thin=thinning,
+    )
+
+    return sort_chain ? sort(chain) : chain
+end
