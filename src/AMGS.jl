@@ -11,21 +11,24 @@ using Accessors
 using MCMCChains
 using OrderedCollections
 
-# Write your package code here.
+
 export step, step_warmup, bundle_samples
 
-export AMGS_Sampler, AMGS_Stopping_Sampler
-
-export AMGS_Internal_Sampler
+# Functions which use a few different MH samplers
+export AMGS_Sampler, AMGS_Stopping_Sampler, RAM_Sampler, Bayes_AMGS_Sampler
 
 export AMGSState
-export getspace
-export propose_amgs!!
-export proposewalk
 
+# Utility functions borrowed from Turing packages (credit their code)
 include("utils.jl")
+
+# Code for each differnt sampler
+
+
 include("amgs_sample.jl")
 include("amgs_stopping_sample.jl")
+include("ram_sample.jl")
+include("bayes_amgs_sample.jl")
 
 
 end # module AMGS

@@ -1,3 +1,4 @@
 working_dev/
 test/test.jl
 test/test2.jl
+test/*.png
