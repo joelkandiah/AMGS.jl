@@ -1,10 +1,10 @@
 # AMGS
 
-AMGS is a Julia package for Algebraic Multigrid Solvers. It provides efficient and scalable solvers for large sparse linear systems.
-
+AMGS is a Julia package for Adaptive metropolis hastings algorithms. 
 ## Installation
 
 To install AMGS, use the Julia package manager:
+**Not yet working, need to dev add for now**
 
 ```julia
 using Pkg
