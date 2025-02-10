@@ -43,6 +43,7 @@ function Bayes_AMGS_Sampler(
 end
 
 DynamicPPL.getspace(::Bayes_AMGS_Sampler{space, <: Any, <: Any, <: Any}) where {space} = space
+DynamicPPL.default_chain_type(sampler::Sampler{<:Bayes_AMGS_Sampler}) = MCMCChains.Chains
 
 # Define the state of the sampler
 # Contains Important quantities for computation of the updated kernel

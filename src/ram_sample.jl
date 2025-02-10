@@ -47,6 +47,7 @@ function RAM_Sampler(
 end
 
 DynamicPPL.getspace(::RAM_Sampler{space, <: Any, <: Any, <: Any, <: Any}) where {space} = space
+DynamicPPL.default_chain_type(sampler::Sampler{<:RAM_Sampler}) = MCMCChains.Chains
 
 # Define the state of the sampler
 # Contains Important quantities for computation of the updated kernel

@@ -52,6 +52,7 @@ function AMGS_Stopping_Sampler(
 end
 
 DynamicPPL.getspace(::AMGS_Stopping_Sampler{space, <: Any, <: Any, <: Any, <: Any, <: Any}) where {space} = space
+DynamicPPL.default_chain_type(sampler::Sampler{<:AMGS_Stopping_Sampler}) = MCMCChains.Chains
 
 # Define the state of the sampler
 # Contains Important quantities for computation of the updated kernel
