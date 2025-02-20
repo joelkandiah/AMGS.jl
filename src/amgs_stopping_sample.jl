@@ -217,7 +217,7 @@ function propose_amgs(
     Σ::AbstractMatrix
 )
     # Grab the parameters we are performing inference on
-    θ = vi[spl]
+    θ = vi[:]
 
     # Propose a new set of parameters
     proposal = proposewalk(rng, θ, Σ)
@@ -265,7 +265,7 @@ function AbstractMCMC.step_warmup(
     prev_transition = AdvancedMH.Transition(vis, lp_old, false)
 
     # Get the parameters of interest and create the covariance matrix
-    theta = vis[spl]
+    theta = vis[:]
     Σ = 0.01 .* abs.(diagm(theta)) + (1e-6 * I)
 
     # Propose a new set of parameters and grab the log density
@@ -371,7 +371,7 @@ function AbstractMCMC.step(
     prev_transition = AdvancedMH.Transition(vis, lp_old, false)
 
     # Get the parameters of interest and create the covariance matrix
-    theta = vis[spl]
+    theta = vis[:]
     Σ = 0.01 .* abs.(diagm(theta)) + (1e-6 * I)
 
     # Propose a new set of parameters and grab the log density
@@ -434,9 +434,6 @@ function AbstractMCMC.step(
     lp_old = getlogp(vis)
     prev_transition = AdvancedMH.Transition(vis, lp_old, false)
 
-    # Get the parameters of interest
-    theta = vis[spl]
-
     # Propose the new parameters and get the log density
     vis = propose_amgs(rng, vis, model, spl, exp(state.β) * state.kernel)
     lp_proposal = getlogp(vis)
@@ -478,7 +475,7 @@ end
 function DynamicPPL.assume(
     rng::Random.AbstractRNG, spl::Turing.Sampler{<:AMGS_Stopping_Sampler}, dist::Distribution, vn::T_VN, vi
 ) where {T_VN <: Turing.VarName}
-    DynamicPPL.updategid!(vi, vn, spl)
+    # DynamicPPL.updategid!(vi, vn, spl)
     return DynamicPPL.assume(dist, vn, vi)
 end
 
@@ -491,7 +488,7 @@ function DynamicPPL.dot_assume(
     var::AbstractMatrix,
     vi,
 )
-    DynamicPPL.updategid!.(Ref(vi), vns, Ref(spl))
+    # DynamicPPL.updategid!.(Ref(vi), vns, Ref(spl))
     return DynamicPPL.dot_assume(dist, var, vns, vi)
 end
 
@@ -504,7 +501,7 @@ function DynamicPPL.dot_assume(
     vi,
 )
     # Just defer to `SampleFromPrior`.
-   DynamicPPL.updategid!.(Ref(vi), vns, Ref(spl))
+#    DynamicPPL.updategid!.(Ref(vi), vns, Ref(spl))
     return DynamicPPL.dot_assume(dists, var, vns, vi)
 end
 

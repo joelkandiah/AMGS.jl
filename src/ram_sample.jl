@@ -186,7 +186,7 @@ function propose_RAM(
     S::T
 ) where {T_rng <: AbstractRNG, T <: Cholesky}
     # Grab the parameters we are performing inference on
-    θ = vi[spl]
+    θ = vi[:]
 
     # Propose a new set of parameters
     proposal, U = proposewalkram(rng, θ, S.L)
@@ -234,7 +234,7 @@ function AbstractMCMC.step_warmup(
     prev_transition = AdvancedMH.Transition(vis, lp_old, false)
 
     # Get the parameters of interest and create the covariance matrix
-    theta = vis[spl]
+    theta = vis[:]
     S = cholesky(0.01 .* abs.(diagm(theta)) + (1e-6 * I))
 
     # Propose a new set of parameters and grab the log density
@@ -341,7 +341,7 @@ function AbstractMCMC.step(
     prev_transition = AdvancedMH.Transition(vis, lp_old, false)
 
     # Get the parameters of interest and create the covariance matrix
-    theta = vis[spl]
+    theta = vis[:]
     S = cholesky(0.01 .* abs.(diagm(theta)) + (1e-6 * I))
 
     # Propose a new set of parameters and grab the log density
@@ -418,7 +418,7 @@ end
 function DynamicPPL.assume(
     rng::Random.AbstractRNG, spl::Turing.Sampler{<:RAM_Sampler}, dist::Distribution, vn::Turing.VarName, vi
 )
-    DynamicPPL.updategid!(vi, vn, spl)
+    # DynamicPPL.updategid!(vi, vn, spl)
     return DynamicPPL.assume(dist, vn, vi)
 end
 
@@ -430,7 +430,7 @@ function DynamicPPL.dot_assume(
     var::AbstractMatrix,
     vi,
 )
-    DynamicPPL.updategid!.(Ref(vi), vns, Ref(spl))
+    # DynamicPPL.updategid!.(Ref(vi), vns, Ref(spl))
     return DynamicPPL.dot_assume(dist, var, vns, vi)
 end
 
@@ -443,7 +443,7 @@ function DynamicPPL.dot_assume(
     vi,
 )
     # Just defer to `SampleFromPrior`.
-    DynamicPPL.updategid!.(Ref(vi), vns, Ref(spl))
+    # DynamicPPL.updategid!.(Ref(vi), vns, Ref(spl))
     return DynamicPPL.dot_assume(dists, var, vns, vi)
 end
 

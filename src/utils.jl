@@ -19,7 +19,7 @@ end
 
 # Define a function which proposes a new set of parameters
 function proposewalk(rng::Random.AbstractRNG, θ::AbstractVector, Σ::AbstractMatrix)
-    return rand(rng, MvNormal(θ, Σ))
+    return rand(rng, MvNormal(eltype(Σ).(θ), Σ))
 end
 
 # Define a function which proposes a new set of parameters
