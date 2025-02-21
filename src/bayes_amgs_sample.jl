@@ -58,7 +58,7 @@ struct BayesAMGSState{
     Tδ<:Real,
     Td<:Int,
     Tc<:Real,
-    TVecX<:AbstractVector
+    TVecX<:LinkedList{Tμ}
 }
     transition::TTrans
     μ::Tμ
@@ -72,6 +72,28 @@ struct BayesAMGSState{
     d::Td
     c::Tc
     vec_X::TVecX
+end
+
+# Function to index a linked list (equivalent to iterating through)
+function get_index_ll(idx::Int, vec_X::LinkedList{T}) where {T}
+    if idx < 1
+        # @error "Index must be greater than 0"
+        throw(ArgumentError("Index must be greater than 0"))
+    elseif idx == 1
+        return vec_X.head
+    end
+    
+    tmp = vec_X
+    for i in 1:idx-1
+        _, tmp = iterate(tmp)
+    end
+
+    if(typeof(tmp) === Nil{T} || typeof(tmp) === Nil{any})
+        # @error "Index out of bounds"
+        throw(ArgumentError("Index out of bounds"))
+    end
+
+    return tmp.head
 end
 
 # Define the initial state of the sampler, use the paper to understand A, δ, d and c
@@ -103,8 +125,8 @@ function init_BayesAMGSState(
     ## copy vector length of mu and initialise zero vector for beta
     step = 1
     λ_start = λ₀ = one(Float64)
-    vec_X = [μ]
-    return BayesAMGSState{T_trans, T_μ, T_kernel, Int, Float64, T_nstart, T_A, T_δ, T_d, T_c, Vector{T_μ}}(transition, μ, kernel, step, λ₀, λ_start, n_start, A, δ, d, c, vec_X)
+    vec_X = cons(μ, nil(typeof(μ)))
+    return BayesAMGSState{T_trans, T_μ, T_kernel, Int, Float64, T_nstart, T_A, T_δ, T_d, T_c, LinkedList{T_μ}}(transition, μ, kernel, step, λ₀, λ_start, n_start, A, δ, d, c, vec_X)
 end
 
 # Write a function which updates the kernel
@@ -124,8 +146,9 @@ function update_kernel(state::BayesAMGSState, trans::AdvancedMH.Transition, spl:
     S = state.kernel
     step = state.step
     X_n = trans.params[:]
-    X_n1 = state.vec_X[step]
-    vec_X = push!(copy(state.vec_X), X_n)
+    X_n1 = state.vec_X.head
+    # Add to the head of the linked list
+    vec_X = cons(X_n, state.vec_X)
 
     λ = state.λ
     δ = state.δ
@@ -141,6 +164,7 @@ function update_kernel(state::BayesAMGSState, trans::AdvancedMH.Transition, spl:
     ν = spl.alg.ν₀
     d = state.d
 
+    # Perform the update differently depending on whether we are dropping one of the 
     if step == 1
         X̄ = (X_n + X_n1) ./ 2.0
         S = (1.0 / (ν + state.d + 3.0)) * ((X_n1 * X_n1') + (X_n * X_n') - 2.0 * (X̄ * X̄') + (ν + d + 1.0) * S)
@@ -148,8 +172,9 @@ function update_kernel(state::BayesAMGSState, trans::AdvancedMH.Transition, spl:
         X̄ = ((step - f_step) / (step - f_step + 1.0)) * μ + (1.0 / (step - f_step + 1.0)) * X_n
         S = (1.0 / (step - f_step + ν + d + 2.0)) * ((step - f_step + ν + d + 1.0) * S + (X_n * X_n') + (step - f_step) * (μ * μ') - (step - f_step + 1.0) * (X̄ * X̄'))
     elseif f_step == f_prev_step + 1
-        X̄ = μ + (1.0 / (step - f_step + 1)) * (X_n - vec_X[f_step])
-        S = S + (1.0 / (step - f_step + ν + d + 2.0)) * ((X_n * X_n') - (vec_X[f_step] * vec_X[f_step]') + (step - f_step + 1.0) * ((μ * μ') - (X̄ * X̄')))
+        Xfn1 = get_index_ll(step - f_step + 2, vec_X)
+        X̄ = μ + (1.0 / (step - f_step + 1)) * (X_n - Xfn1)
+        S = S + (1.0 / (step - f_step + ν + d + 2.0)) * ((X_n * X_n') - (Xfn1 * Xfn1') + (step - f_step + 1.0) * ((μ * μ') - (X̄ * X̄')))
     end
 
     λ = max(spl.alg.λ_min, λ * exp((δ / (n_start + step)) * (prob - spl.alg.acceptance_rate)))
@@ -206,7 +231,7 @@ end
 
 # Write a function which proposes a new set of parameters
 """
-    propose_BayesAMGS(rng::T_rng, vi::AbstractVarInfo, model::AbstractMCMC.AbstractModel, spl::Sampler{<:Bayes_AMGS_Sampler}, S::T) where {T_rng <: AbstractRNG, T <: AbstractMatrix}
+    propose_BayesAMGSLL(rng::T_rng, vi::AbstractVarInfo, model::AbstractMCMC.AbstractModel, spl::Sampler{<:Bayes_AMGS_Sampler}, S::T) where {T_rng <: AbstractRNG, T <: AbstractMatrix}
 
 Propose a new set of parameters for the Bayes AMGS sampler.
 
@@ -217,7 +242,7 @@ Propose a new set of parameters for the Bayes AMGS sampler.
 - `spl::Sampler{<:Bayes_AMGS_Sampler}`: The Bayes AMGS sampler.
 - `S::T`: The covariance matrix for the proposal.
 """
-function propose_BayesAMGS(
+function propose_BayesAMGSLL(
     rng::T_rng,
     vi::AbstractVarInfo,
     model::AbstractMCMC.AbstractModel,
@@ -277,7 +302,7 @@ function AbstractMCMC.step_warmup(
     S = 0.01 .* abs.(diagm(theta)) + (1e-6 * I)
 
     # Propose a new set of parameters and grab the log density
-    vis = propose_BayesAMGS(rng, vis, model, spl, S)
+    vis = propose_BayesAMGSLL(rng, vis, model, spl, S)
     lp_proposal = getlogp(vis)
 
     # Check whether to accept the new parameters
@@ -330,7 +355,7 @@ function AbstractMCMC.step_warmup(
     S = state.kernel
 
     # Propose the new parameters and get the log density
-    vis = propose_BayesAMGS(rng, vis, model, spl, state.λ * state.c * S)
+    vis = propose_BayesAMGSLL(rng, vis, model, spl, state.λ * state.c * S)
     lp_proposal = getlogp(vis)
 
     # Check whether to accept the new parameters and return the previous transition if not
@@ -387,7 +412,7 @@ function AbstractMCMC.step(
     d = length(theta)
     c = 2.38^2 / d
 
-    vis = propose_BayesAMGS(rng, vis, model, spl, c * S)
+    vis = propose_BayesAMGSLL(rng, vis, model, spl, c * S)
     lp_proposal = getlogp(vis)
 
     accep = mh_accept_logdens(rng, lp_proposal, lp_old)
@@ -436,7 +461,7 @@ function AbstractMCMC.step(
     lp_old = getlogp(vis)
     prev_transition = AdvancedMH.Transition(vis, lp_old, false)
 
-    vis = propose_BayesAMGS(rng, vis, model, spl, state.λ * state.c * state.kernel)
+    vis = propose_BayesAMGSLL(rng, vis, model, spl, state.λ * state.c * state.kernel)
     lp_proposal = getlogp(vis)
 
     accep = mh_accept_logdens(rng, lp_proposal, lp_old)
