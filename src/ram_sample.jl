@@ -3,7 +3,7 @@
 
 # Start by defining the sampler
 
-struct RAM_Sampler{space, T_accep <: Real, T_conv_step <: Real, T_lb_eig <: Real, T_ub_eig <: Real} <: AbstractMCMC.AbstractSampler
+struct RAM_Sampler{space, T_accep <: Real, T_conv_step <: Real, T_lb_eig <: Real, T_ub_eig <: Real} <: Turing.InferenceAlgorithm
     acceptance_rate::T_accep
     convergence_step::T_conv_step
     lb_eig::T_lb_eig

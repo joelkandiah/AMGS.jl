@@ -4,7 +4,7 @@
 # Start by defining the sampler
 # Note added the stopping conditions as parameters to the sampler
 # The max number of steps where adaptation occurs, the lower and upper bounds of the acceptance rate to check at each average interval
-struct AMGS_Stopping_Sampler{space, T_accep <: Real, T_conv_step <: Real, T_adapt_period <: Integer, T_accep_l <: Real, T_accep_u <: Real, T_accep_interval <: Integer} <: AbstractMCMC.AbstractSampler
+struct AMGS_Stopping_Sampler{space, T_accep <: Real, T_conv_step <: Real, T_adapt_period <: Integer, T_accep_l <: Real, T_accep_u <: Real, T_accep_interval <: Integer} <: Turing.InferenceAlgorithm
     acceptance_rate::T_accep
     convergence_step::T_conv_step
     max_adapt_period::T_adapt_period

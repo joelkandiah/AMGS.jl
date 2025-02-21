@@ -3,7 +3,7 @@
 
 # Start by defining the sampler
 
-struct Bayes_AMGS_Sampler{space, T_accep <: Real, T_ν <: Real, T_λ <: Real} <: AbstractMCMC.AbstractSampler
+struct Bayes_AMGS_Sampler{space, T_accep <: Real, T_ν <: Real, T_λ <: Real} <: Turing.InferenceAlgorithm
     acceptance_rate::T_accep
     ν₀::T_ν
     λ_min::T_λ
@@ -123,7 +123,7 @@ function update_kernel(state::BayesAMGSState, trans::AdvancedMH.Transition, spl:
     # Grab useful quantities from the state
     S = state.kernel
     step = state.step
-    X_n = trans.params[spl]
+    X_n = trans.params[:]
     X_n1 = state.vec_X[step]
     vec_X = push!(copy(state.vec_X), X_n)
 

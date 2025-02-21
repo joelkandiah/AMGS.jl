@@ -3,7 +3,7 @@
 
 # Start by defining the sampler
 
-struct AMGS_Sampler{space, T_accep <: Real, T_conv_step <: Real} <: AbstractMCMC.AbstractSampler
+struct AMGS_Sampler{space, T_accep <: Real, T_conv_step <: Real} <: Turing.InferenceAlgorithm
     acceptance_rate::T_accep
     convergence_step::T_conv_step
 end
@@ -54,7 +54,6 @@ struct AMGSState{
     step::TStep
     β::Tβ
 end
-
 
 # Define the initial state of the sampler
 """
