@@ -49,7 +49,8 @@ DynamicPPL.default_chain_type(sampler::Sampler{<:Bayes_AMGS_Sampler}) = MCMCChai
 # Contains Important quantities for computation of the updated kernel
 struct BayesAMGSState{
     TTrans<:AdvancedMH.Transition,
-    Tμ <: AbstractVector,
+    Tμ_el <: Real,
+    Tμ <: AbstractVector{Tμ_el},
     TKernel<:AbstractMatrix,
     TStep<:Integer,
     Tλ<:Real,
@@ -58,7 +59,9 @@ struct BayesAMGSState{
     Tδ<:Real,
     Td<:Int,
     Tc<:Real,
-    TVecX<:LinkedList{Tμ}
+    Tμ_like_el <: Real,
+    Tμ_like<:AbstractVector{Tμ_like_el},
+    TVecX<:LinkedList{Tμ_like}
 }
     transition::TTrans
     μ::Tμ
@@ -126,7 +129,7 @@ function init_BayesAMGSState(
     step = 1
     λ_start = λ₀ = one(Float64)
     vec_X = cons(μ, nil(typeof(μ)))
-    return BayesAMGSState{T_trans, T_μ, T_kernel, Int, Float64, T_nstart, T_A, T_δ, T_d, T_c, LinkedList{T_μ}}(transition, μ, kernel, step, λ₀, λ_start, n_start, A, δ, d, c, vec_X)
+    return BayesAMGSState{T_trans, eltype(μ), T_μ, T_kernel, Int, Float64, T_nstart, T_A, T_δ, T_d, T_c, eltype(μ), T_μ, Cons{T_μ}}(transition, μ, kernel, step, λ₀, λ_start, n_start, A, δ, d, c, vec_X)
 end
 
 # Write a function which updates the kernel
