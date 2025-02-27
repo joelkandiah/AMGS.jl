@@ -1,20 +1,32 @@
-# write a functions step and step_warmup which are used in the AMGS_sampler.
+#  write a functions step and step_warmup which are used in the AMGS_sampler.
 # Based on Algorithm 4 in https://link.springer.com/article/10.1007/s11222-008-9110-y
 
 # Start by defining the sampler
 
-struct AMGS_Sampler{space, T_accep <: Real, T_conv_step <: Real} <: Turing.InferenceAlgorithm
+struct AMGS_Sampler{space, T_accep <: Real, T_conv_step <: Real, T_scale <: Real} <: Turing.InferenceAlgorithm
     acceptance_rate::T_accep
     convergence_step::T_conv_step
+    use_noise_stabiliser::Bool
+    noise_scaling::T_scale
 end
 
 function AMGS_Sampler(
     acceptance_rate::T1,
     convergence_step::T2,
     space::Tuple;
-) where {T1 <: Real, T2 <: Real}
-    return AMGS_Sampler{space, T1, T2}(acceptance_rate, convergence_step)
+    noise_stabiliser::Bool=false,
+    noise_stabiliser_scaling::T3=1e-6
+) where {T1 <: Real, T2 <: Real, T3 <: Real}
+    return AMGS_Sampler{space, T1, T2, T3}(acceptance_rate, convergence_step, noise_stabiliser, noise_stabiliser_scaling)
 end
+
+# function AMGS_Sampler(
+#     acceptance_rate::T1,
+#     convergence_step::T2,
+#     space::Tuple;
+# ) where {T1 <: Real, T2 <: Real}
+#     return AMGS_Sampler{space, T1, T2, Float64}(acceptance_rate, convergence_step, false, NaN)
+# end
 
 
 """
@@ -32,10 +44,33 @@ function AMGS_Sampler(
     convergence_step::T2,
     space::Symbol...;
 )  where {T1 <: Real, T2 <: Real}
-    return AMGS_Sampler(acceptance_rate, convergence_step, space;)
+    return AMGS_Sampler(acceptance_rate, convergence_step, space)
 end
 
-DynamicPPL.getspace(::AMGS_Sampler{space, <: Any, <: Any}) where {space} = space
+"""
+    AMGS_Sampler(acceptance_rate::T1, convergence_step::T2, noise_stabiliser::Bool, noise_stabiliser_scaling::T3, space::Tuple) where {T1 <: Real, T2 <: Real, T3 <: Real}
+
+Create a new AMGS sampler with the specified acceptance rate, convergence step, and space.
+
+# Arguments
+- `acceptance_rate::T1`: The target acceptance rate for the sampler.
+- `convergence_step::T2`: A tuning parameter for the rate of convergence/step size of the sampler.
+- `noise_stabiliser::Bool`: Whether to use a noise stabiliser.
+- `noise_stabiliser_scaling::T3`: The scaling factor for the noise stabiliser.
+- `space::Tuple`: The parameter space for the sampler.
+"""
+function AMGS_Sampler(
+    acceptance_rate::T1,
+    convergence_step::T2,
+    noise_stabiliser::Bool,
+    noise_stabiliser_scaling::T3,
+    space::Symbol...;
+)  where {T1 <: Real, T2 <: Real, T3 <: Real}
+    return AMGS_Sampler(acceptance_rate, convergence_step, space; noise_stabiliser = noise_stabiliser, noise_stabiliser_scaling = noise_stabiliser_scaling)
+end
+
+
+DynamicPPL.getspace(::AMGS_Sampler{space, <: Any, <: Any, <: Any}) where {space} = space
 
 DynamicPPL.default_chain_type(sampler::Sampler{<:AMGS_Sampler}) = MCMCChains.Chains
 
@@ -43,7 +78,7 @@ DynamicPPL.default_chain_type(sampler::Sampler{<:AMGS_Sampler}) = MCMCChains.Cha
 # Contains Important quantities for computation of the updated kernel
 struct AMGSState{
     TTrans<:AdvancedMH.Transition,
-    Tμ<:Vector,
+    Tμ<:AbstractVector,
     TKernel<:Matrix,
     TStep<:Integer,
     Tβ<:Real
@@ -74,7 +109,7 @@ function init_AMGSState(
     ## copy vector length of mu and initialise zero vector for beta
     step = 1
     β = zero(eltype(μ))
-    AMGSState{T_trans, Vector{T_μ}, T_kernel, Int, typeof(β)}(transition, μ, kernel, step, β)
+    AMGSState{T_trans, typeof(μ), T_kernel, Int, typeof(β)}(transition, μ, kernel, step, β)
 end
 
 # Define the initial state of the sampler in a 1D case
@@ -86,8 +121,8 @@ function init_AMGSState(
     ## copy vector length of mu and initialise zero vector for beta
     step = 1
     β = zero(typeof(μ))
-    μ = [μ]
-    AMGSState{T_trans, T_μ, T_kernel, Int, typeof(β)}(transition, μ, kernel, step, β)
+    new_μ = [μ]
+    AMGSState{T_trans, typeof(new_μ), T_kernel, Int, typeof(β)}(transition, new_μ, kernel, step, β)
 end
 
 # Construct a transition object using our parameters of interest (varinfo instead of params)
@@ -118,11 +153,14 @@ function update_kernel(state::AMGSState, trans::T, spl::Sampler{<:AMGS_Sampler},
     # Follow maths from arXiv paper to update the kernel and the global scale β
     β = state.β
     η = (step + 1.0)^(-spl.alg.convergence_step)
-    β = β + η * (prob - spl.alg.acceptance_rate)
-    Δ = trans.params[spl] - μ
-    μ = (1.0 - η) * μ + (η * trans.params[spl])
-    Σ = (1.0 - η) * Σ + (η * (Δ * (Δ')))
-    new_state = AMGSState(trans, μ, Σ, step + 1, β)
+    new_β = β + η * (prob - spl.alg.acceptance_rate)
+    Δ = trans.params[:] - μ
+    new_μ = (1.0 - η) * μ + (η * trans.params[:])
+    
+    # Add noise to the kernel if requested
+    noise_term = spl.alg.use_noise_stabiliser * spl.alg.noise_scaling * η * rand(size(Δ)[1])
+    new_Σ = (1.0 - η) * Σ + (η * (Δ * (Δ'))) + diagm(noise_term)
+    new_state = AMGSState(trans, new_μ, new_Σ, step + 1, new_β)
     return new_state
 end
 
@@ -294,7 +332,7 @@ function AbstractMCMC.step_warmup(
     accep = mh_accept_logdens(rng, lp_proposal, lp_old)
     if !accep
         new_state = AMGSState(prev_transition, state.μ, Σ, state.step, state.β)
-        return prev_transition, state
+        return prev_transition, new_state
     end
 
     # Create a new transition and state object if accepted

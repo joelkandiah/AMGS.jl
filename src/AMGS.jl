@@ -16,6 +16,7 @@ using DataStructures
 #TODO: Resolve the type instability in the code
 #TODO: Extend these samplers to use the Gibbs sampling style mechanism for block samplers (want to wrap these samplers)
 #TODO: Convert the stopping sampler into a wrapper for the other adaptive samplers (it ony really needs the computed acceptance rate and the state from the returns from each step so perhaps just a wrapper on the step function)
+#TODO Implement setparams_varnames!!
 export step, step_warmup, bundle_samples
 
 # Functions which use a few different MH samplers

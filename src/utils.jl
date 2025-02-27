@@ -29,7 +29,10 @@ function proposewalkram(rng::Random.AbstractRNG, θ::AbstractVector, S::LowerTri
 end
 
 # Write a function which checks whether to accept a new set of parameters
-mh_accept_logdens(rng::T, s_prime::T2, s::T2) where {T <:AbstractRNG, T2 <: Real} = -randexp() < min(1e-6, s_prime - s)
+mh_accept_logdens(rng::T, s_prime::T2, s::T2) where {T <:AbstractRNG, T2 <: Real} = -randexp(rng) < min(1e-6, s_prime - s)
+
+# Write a function which checks whether to accept a new set of parameters dr??
+mh_dr_accept_logdens(rng::T, s_prime::T2, s::T2, s0::T2) where {T <:AbstractRNG, T2 <: Real} = -randexp(rng) < min(1e-6, log(exp(s) - exp(s_prime)) - log(exp(s0) - exp(s_prime)))
 
 function _params_to_array(model::DynamicPPL.Model, ts::Vector)
     names_set = OrderedSet{VarName}()

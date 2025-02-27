@@ -4,28 +4,35 @@
 # Start by defining the sampler
 # Note added the stopping conditions as parameters to the sampler
 # The max number of steps where adaptation occurs, the lower and upper bounds of the acceptance rate to check at each average interval
-struct AMGS_Stopping_Sampler{space, T_accep <: Real, T_conv_step <: Real, T_adapt_period <: Integer, T_accep_l <: Real, T_accep_u <: Real, T_accep_interval <: Integer} <: Turing.InferenceAlgorithm
+struct AMGS_Stopping_Sampler{space, T_accep <: Real, T_conv_step <: Real, T_adapt_period <: Integer, T_accep_l <: Real, T_accep_u <: Real, T_accep_interval <: Integer, T_scale <: Real} <: Turing.InferenceAlgorithm
     acceptance_rate::T_accep
     convergence_step::T_conv_step
     max_adapt_period::T_adapt_period
     lower_stopping_accep::T_accep_l
     upper_stopping_accep::T_accep_u
     average_interval::T_accep_interval
+    use_noise_stabiliser::Bool
+    noise_scaling::T_scale
 end
 
 """
-    AMGS_Stopping_Sampler(acceptance_rate::T1, convergence_step::T2, max_adapt_period::T3, lower_stopping_accep::T4, upper_stopping_accep::T5, average_interval::T6, space::Tuple) where {T1 <: Real, T2 <: Real, T3 <: Integer, T4 <: Real, T5 <: Real, T6 <: Integer}
+    AMGS_Stopping_Sampler(acceptance_rate, convergence_step, max_adapt_period, lower_stopping_accep, upper_stopping_accep, average_interval, space::Tuple; noise_stabiliser = false, noise_stabiliser_scaling = 1e-6)
 
-Create a new AMGS Stopping sampler with the specified acceptance rate, convergence step, maximum adaptation period, lower and upper stopping acceptance rates, average interval, and space.
+Construct an `AMGS_Stopping_Sampler` object.
 
 # Arguments
-- `acceptance_rate::T1`: The target acceptance rate for the sampler.
-- `convergence_step::T2`: A tuning parameter for the rate of convergence/step size of the sampler.
-- `max_adapt_period::T3`: The maximum number of steps where adaptation occurs.
-- `lower_stopping_accep::T4`: The lower bound of the acceptance rate to check at each average interval.
-- `upper_stopping_accep::T5`: The upper bound of the acceptance rate to check at each average interval.
-- `average_interval::T6`: The number of steps over which to average the acceptance rate.
-- `space::Tuple`: The parameter space for the sampler.
+- `acceptance_rate::Real`: The target acceptance rate.
+- `convergence_step::Real`: A tuning parameter for convergence/step size.
+- `max_adapt_period::Integer`: The maximum adaptation period.
+- `lower_stopping_accep::Real`: The lower bound for stopping acceptance rate.
+- `upper_stopping_accep::Real`: The upper bound for stopping acceptance rate.
+- `average_interval::Integer`: The interval for averaging acceptance rates.
+- `space::Tuple`: The parameter space.
+- `noise_stabiliser::Bool`: (Optional) Whether to use a noise stabiliser, defaults to false.
+- `noise_stabiliser_scaling::Real`: (Optional) The scaling of the noise stabiliser, defaults to 1e-6.
+
+# Returns
+An `AMGS_Stopping_Sampler` instance.
 """
 function AMGS_Stopping_Sampler(
     acceptance_rate::T1,
@@ -35,10 +42,31 @@ function AMGS_Stopping_Sampler(
     upper_stopping_accep::T5,
     average_interval::T6,
     space::Tuple;
-) where {T1 <: Real, T2 <: Real, T3 <: Integer, T4 <: Real, T5 <: Real, T6 <: Integer}
-    return AMGS_Stopping_Sampler{space, T1, T2, T3, T4, T5, T6}(acceptance_rate, convergence_step, max_adapt_period, lower_stopping_accep, upper_stopping_accep, average_interval)
+    noise_stabiliser::Bool = false,
+    noise_stabiliser_scaling::T7 = 1e-6
+) where {T1 <: Real, T2 <: Real, T3 <: Integer, T4 <: Real, T5 <: Real, T6 <: Integer, T7<:Real}
+    return AMGS_Stopping_Sampler{space, T1, T2, T3, T4, T5, T6, T7}(acceptance_rate, convergence_step, max_adapt_period, lower_stopping_accep, upper_stopping_accep, average_interval, noise_stabiliser, noise_stabiliser_scaling)
 end
 
+"""
+    AMGS_Stopping_Sampler(acceptance_rate, convergence_step, max_adapt_period, lower_stopping_accep, upper_stopping_accep, average_interval, space::Symbol...; noise_stabiliser = false, noise_stabiliser_scaling = 1e-6)
+
+Construct an `AMGS_Stopping_Sampler` object with space defined by symbols.
+
+# Arguments
+- `acceptance_rate::Real`: The target acceptance rate.
+- `convergence_step::Real`: A tuning parameter for convergence/step size.
+- `max_adapt_period::Integer`: The maximum adaptation period.
+- `lower_stopping_accep::Real`: The lower bound for stopping acceptance rate.
+- `upper_stopping_accep::Real`: The upper bound for stopping acceptance rate.
+- `average_interval::Integer`: The interval for averaging acceptance rates.
+- `space::Symbol...`: The parameter space defined by symbols.
+- `noise_stabiliser::Bool`: (Optional) Whether to use a noise stabiliser, defaults to false.
+- `noise_stabiliser_scaling::Real`: (Optional) The scaling of the noise stabiliser, defaults to 1e-6.
+
+# Returns
+An `AMGS_Stopping_Sampler` instance.
+"""
 function AMGS_Stopping_Sampler(
     acceptance_rate::T1,
     convergence_step::T2,
@@ -47,16 +75,32 @@ function AMGS_Stopping_Sampler(
     upper_stopping_accep::T5,
     average_interval::T6,
     space::Symbol...;
-) where {T1 <: Real, T2 <: Real, T3 <: Integer, T4 <: Real, T5 <: Real, T6 <: Integer}
-    return AMGS_Stopping_Sampler(acceptance_rate, convergence_step, max_adapt_period, lower_stopping_accep, upper_stopping_accep, average_interval, space;)
+    noise_stabiliser::Bool = false,
+    noise_stabiliser_scaling::T7 = 1e-6
+) where {T1 <: Real, T2 <: Real, T3 <: Integer, T4 <: Real, T5 <: Real, T6 <: Integer, T7 <:Real}
+    return AMGS_Stopping_Sampler(acceptance_rate, convergence_step, max_adapt_period, lower_stopping_accep, upper_stopping_accep, average_interval, space; noise_stabiliser = noise_stabiliser, noise_stabiliser_scaling = noise_stabiliser_scaling)
 end
 
-DynamicPPL.getspace(::AMGS_Stopping_Sampler{space, <: Any, <: Any, <: Any, <: Any, <: Any}) where {space} = space
+DynamicPPL.getspace(::AMGS_Stopping_Sampler{space, <: Any, <: Any, <: Any, <: Any, <: Any, <: Any, <:Any}) where {space} = space
 DynamicPPL.default_chain_type(sampler::Sampler{<:AMGS_Stopping_Sampler}) = MCMCChains.Chains
 
 # Define the state of the sampler
 # Contains Important quantities for computation of the updated kernel
 # In addition to the AMGSState, we also store the previous accepts as well as whether to adaptation has ended
+"""
+    AMGSStoppingState{TTrans<:AdvancedMH.Transition, Tμ<:Vector, TKernel<:Matrix, TStep<:Integer, Tβ<:Real, TΔi<:Vector}
+
+The state object for the AMGS Stopping sampler.
+
+# Fields
+- `transition::TTrans`: The current transition object.
+- `μ::Tμ`: The current mean vector of the target distribution.
+- `kernel::TKernel`: The current covariance kernel.
+- `step::TStep`: The current step number.
+- `β::Tβ`: The global scale parameter.
+- `Δi::TΔi`: The vector of recent acceptance values.
+- `stopped::Bool`: Whether the adaptation process has stopped.
+"""
 struct AMGSStoppingState{
     TTrans<:AdvancedMH.Transition,
     Tμ<:Vector,
@@ -76,15 +120,18 @@ end
 
 # Define the initial state of the sampler
 """
-    init_AMGSStoppingState(transition::T_trans, μ::Vector{T_μ}, kernel::T_kernel, sampler::Turing.Sampler{<:AMGS_Stopping_Sampler}) where {T_trans <: AdvancedMH.AbstractTransition, T_μ <: Real, T_kernel <: Matrix}
+    init_AMGSStoppingState(transition, μ, kernel, sampler)
 
-Initialize the state of the AMGS Stopping sampler with the given transition, mean vector μ, kernel matrix, and sampler.
+Initialize the `AMGSStoppingState` object.
 
 # Arguments
-- `transition::T_trans`: The initial transition object.
-- `μ::Vector{T_μ}`: The initial mean vector.
-- `kernel::T_kernel`: The initial kernel matrix.
+- `transition::AdvancedMH.AbstractTransition`: The initial transition object.
+- `μ::Vector{<:Real}`: The initial mean vector.
+- `kernel::Matrix{<:Real}`: The initial kernel matrix.
 - `sampler::Turing.Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
+
+# Returns
+An `AMGSStoppingState` instance.
 """
 function init_AMGSStoppingState(
     transition::T_trans,
@@ -102,15 +149,18 @@ end
 
 # Define the initial state of the sampler in a 1D case
 """
-    init_AMGSStoppingState(transition::T_trans, μ::T_μ, kernel::T_kernel, sampler::Turing.Sampler{<:AMGS_Stopping_Sampler}) where {T_trans <: AdvancedMH.AbstractTransition, T_μ <: Real, T_kernel <: Matrix}
+    init_AMGSStoppingState(transition, μ, kernel, sampler)
 
-Initialize the state of the AMGS Stopping sampler with the given transition, mean vector μ, kernel matrix, and sampler for a 1D case.
+Initialize the `AMGSStoppingState` object for a 1D case.
 
 # Arguments
-- `transition::T_trans`: The initial transition object.
-- `μ::T_μ`: The initial mean value.
-- `kernel::T_kernel`: The initial kernel matrix.
+- `transition::AdvancedMH.AbstractTransition`: The initial transition object.
+- `μ::Real`: The initial mean value.
+- `kernel::Matrix{<:Real}`: The initial kernel matrix.
 - `sampler::Turing.Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
+
+# Returns
+An `AMGSStoppingState` instance.
 """
 function init_AMGSStoppingState(
     transition::T_trans,
@@ -122,20 +172,24 @@ function init_AMGSStoppingState(
     step = 1
     β = zero(typeof(μ))
     μ = [μ]
-    AMGSStoppingState{T_trans, T_μ, T_kernel, Int, typeof(β)}(transition, μ, kernel, step, β, sampler, false)
+    Δi = zeros(typeof(μ), sampler.alg.average_interval)
+    AMGSStoppingState{T_trans, typeof(μ), T_kernel, Int, typeof(β),typeof(Δi)}(transition, μ, kernel, step, β, Δi, false)
 end
 
 # Write a function which updates the kernel
 """
-    update_kernel(state::AMGSStoppingState, trans::T, spl::Sampler{<:AMGS_Stopping_Sampler}, prob::T3) where {T <: AdvancedMH.Transition, T3 <: Real}
+    update_kernel(state, trans, spl, prob)
 
-Update the kernel matrix, and internal quantities of the AMGS Stopping sampler state based on the new transition and acceptance probability.
+Update the kernel matrix, mean vector, and other internal quantities of the `AMGSStoppingState`.
 
 # Arguments
 - `state::AMGSStoppingState`: The current state of the sampler.
-- `trans::T`: The new transition object.
-- `spl::Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
-- `prob::T3`: The acceptance probability.
+- `trans::AdvancedMH.Transition`: The new transition object.
+- `spl::Turing.Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
+- `prob::Real`: The acceptance probability.
+
+# Returns
+A new `AMGSStoppingState` with updated quantities.
 """
 function update_kernel(state::AMGSStoppingState, trans::T, spl::Sampler{<:AMGS_Stopping_Sampler}, prob::T3) where {T <: AdvancedMH.Transition, T3 <: Real}
     # Grab useful quantities from the state
@@ -147,25 +201,31 @@ function update_kernel(state::AMGSStoppingState, trans::T, spl::Sampler{<:AMGS_S
     # Follow maths from arXiv paper to update the kernel and the global scale β
     η = (step + 1.0)^(-spl.alg.convergence_step)
     β = β + η * (prob - spl.alg.acceptance_rate)
-    Δ = trans.params[spl] - μ
-    μ = (1.0 - η) * μ + (η * trans.params[spl])
-    Σ = (1.0 - η) * Σ + (η * (Δ * (Δ')))
+    Δ = trans.params[:] - μ
+    μ = (1.0 - η) * μ + (η * trans.params[:])
+    
+    # Add noise to the kernel if requested
+    noise_term = spl.alg.use_noise_stabiliser * spl.alg.noise_scaling * η * rand(size(Δ)[1])
+    Σ = (1.0 - η) * Σ + (η * (Δ * (Δ'))) + diagm(noise_term)
     new_state = AMGSStoppingState(trans, μ, Σ, step + 1, β, state.Δi, state.stopped)
     return new_state
 end
 
 # Function to set the new parameters
 """
-    set_params_amgs(rng::AbstractRNG, vi::AbstractVarInfo, model::AbstractMCMC.AbstractModel, spl::Sampler{<:AMGS_Stopping_Sampler}, params::Vector{T}) where {T <: Real}
+    set_params_amgs(rng, vi, model, spl, params)
 
-Set the parameters of the AMGS Stopping sampler.
+Set the parameters and log density in the `VarInfo` object for the AMGS Stopping sampler.
 
 # Arguments
 - `rng::AbstractRNG`: The random number generator.
-- `vi::AbstractVarInfo`: The variable information.
+- `vi::AbstractVarInfo`: The variable information object.
 - `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
-- `params::Vector{T}`: The new parameters.
+- `spl::Turing.Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
+- `params::Vector{<:Real}`: The new parameters.
+
+# Returns
+The updated `VarInfo` object with new parameters and log density.
 """
 function set_params_amgs(
     rng::AbstractRNG,
@@ -198,16 +258,19 @@ end
 
 # Write a function which proposes a new set of parameters
 """
-    propose_amgs(rng::AbstractRNG, vi::AbstractVarInfo, model::AbstractMCMC.AbstractModel, spl::Sampler{<:AMGS_Stopping_Sampler}, Σ::AbstractMatrix)
+    propose_amgs(rng, vi, model, spl, Σ)
 
-Propose a new set of parameters for the AMGS Stopping sampler.
+Propose a new set of parameters using a random walk proposal with the given covariance matrix.
 
 # Arguments
 - `rng::AbstractRNG`: The random number generator.
-- `vi::AbstractVarInfo`: The variable information.
+- `vi::AbstractVarInfo`: The variable information object.
 - `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
-- `Σ::AbstractMatrix`: The covariance matrix for the proposal.
+- `spl::Turing.Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
+- `Σ::AbstractMatrix{<:Real}`: The covariance matrix for the proposal.
+
+# Returns
+The updated `VarInfo` object with the proposed parameters and log density.
 """
 function propose_amgs(
     rng::AbstractRNG,
@@ -228,16 +291,19 @@ end
 
 # Write a function which initialises the chain where there are warmup steps
 """
-    AbstractMCMC.step_warmup(rng::AbstractRNG, model::AbstractMCMC.AbstractModel, spl::Sampler{<:AMGS_Stopping_Sampler}; initial_params=nothing, kwargs...)
+    step_warmup(rng, model, spl; initial_params = nothing, kwargs...)
 
 Perform an initial warmup step for the AMGS Stopping sampler.
 
 # Arguments
 - `rng::AbstractRNG`: The random number generator.
 - `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
-- `initial_params`: The initial parameters (optional).
+- `spl::Turing.Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
+- `initial_params`: (Optional) The initial parameters.
 - `kwargs...`: Additional keyword arguments.
+
+# Returns
+A tuple containing the transition and the updated state.
 """
 function AbstractMCMC.step_warmup(
     rng::AbstractRNG,
