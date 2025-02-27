@@ -3,11 +3,13 @@
 
 # Start by defining the sampler
 
-struct Bayes_AMGS_Sampler{space, T_accep <: Real, T_ν <: Real, T_λ <: Real} <: Turing.InferenceAlgorithm
+struct Bayes_AMGS_Sampler{space, T_accep <: Real, T_ν <: Real, T_λ <: Real, T_noise_scaling <: Real} <: Turing.InferenceAlgorithm
     acceptance_rate::T_accep
     ν₀::T_ν
     λ_min::T_λ
     f::Function
+    use_noise_stabiliser::Bool
+    noise_scaling::T_noise_scaling
 end
 
 """
@@ -21,6 +23,8 @@ Create a new Bayes AMGS sampler with the specified acceptance rate, ν₀, λ_mi
 - `λ_min::T3`: The minimum value for λ.
 - `f`: A function that takes and returns one integer used in the algorithm to determine the earliest step that information about the kernel is provided (should grow slower than the step, i.e. step - f(step) -> ∞ as step -> ∞).
 - `space::Tuple`: The parameter space for the sampler.
+- `noise_stabiliser::Bool`: (Optional) Whether to use a noise stabiliser, defaults to false.
+- `noise_stabiliser_scaling::Real`: (Optional) The scaling of the noise stabiliser, defaults to 1e-6.
 """
 function Bayes_AMGS_Sampler(
     acceptance_rate::T1,
@@ -28,8 +32,10 @@ function Bayes_AMGS_Sampler(
     λ_min::T3,
     f,
     space::Tuple;
-) where {T1 <: Real, T2 <: Real, T3 <: Real}
-    return Bayes_AMGS_Sampler{space, T1, T2, T3}(acceptance_rate, ν₀, λ_min, f)
+    noise_stabiliser::Bool = false,
+    noise_stabiliser_scaling::T4 = 1e-6
+) where {T1 <: Real, T2 <: Real, T3 <: Real, T4 <: Real}
+    return Bayes_AMGS_Sampler{space, T1, T2, T3, T4}(acceptance_rate, ν₀, λ_min, f, noise_stabiliser, noise_stabiliser_scaling)
 end
 
 function Bayes_AMGS_Sampler(
@@ -38,11 +44,13 @@ function Bayes_AMGS_Sampler(
     λ_min::T3,
     f,
     space::Symbol...;
-)  where {T1 <: Real, T2 <: Real, T3 <: Real}
-    return Bayes_AMGS_Sampler(acceptance_rate, ν₀, λ_min, f, space)
+    noise_stabiliser::Bool = false,
+    noise_stabiliser_scaling::T4 = 1e-6
+)  where {T1 <: Real, T2 <: Real, T3 <: Real, T4 <: Real}
+    return Bayes_AMGS_Sampler(acceptance_rate, ν₀, λ_min, f, space; noise_stabiliser = noise_stabiliser, noise_stabiliser_scaling = noise_stabiliser_scaling)
 end
 
-DynamicPPL.getspace(::Bayes_AMGS_Sampler{space, <: Any, <: Any, <: Any}) where {space} = space
+DynamicPPL.getspace(::Bayes_AMGS_Sampler{space, <: Any, <: Any, <: Any, <:Any}) where {space} = space
 DynamicPPL.default_chain_type(sampler::Sampler{<:Bayes_AMGS_Sampler}) = MCMCChains.Chains
 
 # Define the state of the sampler
@@ -166,18 +174,23 @@ function update_kernel(state::BayesAMGSState, trans::AdvancedMH.Transition, spl:
 
     ν = spl.alg.ν₀
     d = state.d
+    noise_term = spl.alg.use_noise_stabiliser * spl.alg.noise_scaling
 
     # Perform the update differently depending on whether we are dropping one of the 
     if step == 1
         X̄ = (X_n + X_n1) ./ 2.0
         S = (1.0 / (ν + state.d + 3.0)) * ((X_n1 * X_n1') + (X_n * X_n') - 2.0 * (X̄ * X̄') + (ν + d + 1.0) * S)
+        S = S + diagm(noise_term .* rand(size(X_n)[1]))
     elseif f_step == f_prev_step
         X̄ = ((step - f_step) / (step - f_step + 1.0)) * μ + (1.0 / (step - f_step + 1.0)) * X_n
         S = (1.0 / (step - f_step + ν + d + 2.0)) * ((step - f_step + ν + d + 1.0) * S + (X_n * X_n') + (step - f_step) * (μ * μ') - (step - f_step + 1.0) * (X̄ * X̄'))
+        S = S + diagm(noise_term .* rand(size(X_n)[1]))
+
     elseif f_step == f_prev_step + 1
         Xfn1 = get_index_ll(step - f_step + 2, vec_X)
         X̄ = μ + (1.0 / (step - f_step + 1)) * (X_n - Xfn1)
         S = S + (1.0 / (step - f_step + ν + d + 2.0)) * ((X_n * X_n') - (Xfn1 * Xfn1') + (step - f_step + 1.0) * ((μ * μ') - (X̄ * X̄')))
+        S = S + diagm(noise_term .* rand(size(X_n)[1]))
     end
 
     λ = max(spl.alg.λ_min, λ * exp((δ / (n_start + step)) * (prob - spl.alg.acceptance_rate)))
