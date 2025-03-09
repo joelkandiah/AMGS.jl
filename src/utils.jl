@@ -32,7 +32,22 @@ end
 mh_accept_logdens(rng::T, s_prime::T2, s::T2) where {T <:AbstractRNG, T2 <: Real} = -randexp(rng) < min(1e-6, s_prime - s)
 
 # Write a function which checks whether to accept a new set of parameters dr??
-mh_dr_accept_logdens(rng::T, s_prime::T2, s::T2, s0::T2) where {T <:AbstractRNG, T2 <: Real} = -randexp(rng) < min(1e-6, log(exp(s) - exp(s_prime)) - log(exp(s0) - exp(s_prime)))
+function mh_dr_accept_logdens(rng::T, s_prime::T2, s::T2, s0::T2) where {T <:AbstractRNG, T2 <: Real} 
+    diff_delay_ll = exp(s_prime) - exp(s)
+    diff_last_delay_ll = exp(s0) - exp(s)
+    final_diff = exp(s_prime) - exp(s0)
+    if(final_diff > 0)
+        return 1, true
+    end
+    if(diff_delay_ll < 0)
+        return 0, false
+    end 
+    if(diff_last_delay_ll < 0)
+        return 1, true
+    end
+    prob = exp(log(diff_delay_ll) - log(diff_last_delay_ll))
+    return  prob, -randexp(rng) < min(1e-6, log(diff_delay_ll) - log(diff_last_delay_ll))
+end
 
 function _params_to_array(model::DynamicPPL.Model, ts::Vector)
     names_set = OrderedSet{VarName}()
