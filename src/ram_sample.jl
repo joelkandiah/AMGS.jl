@@ -165,6 +165,42 @@ function set_params_ram(
     return setlogp!!(vi, lp_proposal)
 end
 
+# Function to set the new parameters (for use with gibbs sampler)
+Turing.Inference.isgibbscomponent(::RAM_Sampler) = true 
+
+# drop space function
+Turing.Inference.drop_space(alg::RAM_Sampler{space,T1,T2,T3,T4}) where {space,T1,T2,T3,T4} = RAM_Sampler{(),T1,T2,T3,T4}(alg.acceptance_rate, alg.convergence_step, alg.lb_eig, alg.ub_eig, alg.bound_eigs)
+
+# Get varinfo
+function Turing.Inference.varinfo(state::T) where {T<:RAMState}
+    # display(state.transition.params)
+    # display(typeof(state.transition.params))
+    return state.transition.params
+end
+# function isgibbscomponent(::T) where {T<:AMGS_Sampler} 
+#     return true
+# end
+
+
+function Turing.Inference.setparams_varinfo!!(
+    model::DynamicPPL.Model,
+    sampler::Sampler{<:RAM_Sampler},
+    state::RAMState,
+    params::AbstractVarInfo,
+)
+
+    # Update the vi
+    vi  = last(DynamicPPL.evaluate!!(model, params, DynamicPPL.leafcontext(model.context)))
+
+    #update the model state
+    new_transition = AdvancedMH.Transition(vi, getlogp(vi), state.transition.accepted)
+    new_state = RAMState(new_transition, state.kernel, state.step)
+    
+    # Update the VarInfo with the new log density
+    return new_state
+end
+
+
 # Write a function which proposes a new set of parameters
 """
     propose_RAM(rng::T_rng, vi::AbstractVarInfo, model::AbstractMCMC.AbstractModel, spl::Sampler{<:RAM_Sampler}, S::T) where {T_rng <: AbstractRNG, T <: Cholesky}
@@ -217,9 +253,7 @@ function AbstractMCMC.step_warmup(
 )
     # If we're doing random walk with a covariance matrix,
     # just link everything before sampling.
-    vis = VarInfo()
-    spl_init = DynamicPPL.initialsampler(spl)
-    model(rng, vis, spl_init)
+    vis = DynamicPPL.default_varinfo(rng, model, spl)
 
     # If there are initial parameters, set them and the logdensity
     if initial_params !== nothing
@@ -322,9 +356,7 @@ function AbstractMCMC.step(
 )
     # If we're doing random walk with a covariance matrix,
     # just link everything before sampling.
-    vis = VarInfo()
-    spl_init = DynamicPPL.initialsampler(spl)
-    model(rng, vis, spl_init)
+    vis = DynamicPPL.default_varinfo(rng, model, spl)
 
     # If there are initial parameters, set them and the logdensity
     if initial_params !== nothing
@@ -341,6 +373,7 @@ function AbstractMCMC.step(
     prev_transition = AdvancedMH.Transition(vis, lp_old, false)
 
     # Get the parameters of interest and create the covariance matrix
+    #TODO replace with noise!!!
     theta = vis[:]
     S = cholesky(0.01 .* abs.(diagm(theta)) + (1e-6 * I))
 

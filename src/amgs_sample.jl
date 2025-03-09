@@ -206,6 +206,41 @@ function set_params_amgs(
     return setlogp!!(vi, lp_init)
 end
 
+# Function to set the new parameters (for use with gibbs sampler)
+Turing.Inference.isgibbscomponent(::AMGS_Sampler) = true 
+
+# drop space function
+Turing.Inference.drop_space(alg::AMGS_Sampler{space,T1,T2,T3}) where {space,T1,T2,T3} = AMGS_Sampler{(),T1,T2,T3}(alg.acceptance_rate, alg.convergence_step, alg.use_noise_stabiliser, alg.noise_scaling)
+
+# Get varinfo
+function Turing.Inference.varinfo(state::T) where {T<:AMGSState}
+    # display(state.transition.params)
+    # display(typeof(state.transition.params))
+    return state.transition.params
+end
+# function isgibbscomponent(::T) where {T<:AMGS_Sampler} 
+#     return true
+# end
+
+
+function Turing.Inference.setparams_varinfo!!(
+    model::DynamicPPL.Model,
+    sampler::Sampler{<:AMGS_Sampler},
+    state::AMGSState,
+    params::AbstractVarInfo,
+)
+
+    # Update the vi
+    vi  = last(DynamicPPL.evaluate!!(model, params, DynamicPPL.leafcontext(model.context)))
+
+    #update the model state
+    new_transition = AdvancedMH.Transition(vi, getlogp(vi), state.transition.accepted)
+    new_state = AMGSState(new_transition, state.μ, state.kernel, state.step, state.β)
+    
+    # Update the VarInfo with the new log density
+    return new_state
+end
+
 # Write a function which proposes a new set of parameters
 """
     propose_amgs(rng::AbstractRNG, vi::AbstractVarInfo, model::AbstractMCMC.AbstractModel, spl::Sampler{<:AMGS_Sampler}, Σ::AbstractMatrix)
@@ -258,9 +293,7 @@ function AbstractMCMC.step_warmup(
 )
     # If we're doing random walk with a covariance matrix,
     # just link everything before sampling.
-    vis = VarInfo()
-    spl_init = DynamicPPL.initialsampler(spl)
-    model(rng, vis, spl_init)
+    vis = DynamicPPL.default_varinfo(rng, model, spl)
 
     # If there are initial parameters, set them and the logdensity
     if initial_params !== nothing
@@ -363,9 +396,7 @@ function AbstractMCMC.step(
 )
     # If we're doing random walk with a covariance matrix,
     # just link everything before sampling.
-    vis = VarInfo()
-    spl_init = DynamicPPL.initialsampler(spl)
-    model(rng, vis, spl_init)
+    vis = DynamicPPL.default_varinfo(rng, model, spl)
 
     # If there are initial parameters, set them and the logdensity
     if initial_params !== nothing

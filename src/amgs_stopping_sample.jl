@@ -256,6 +256,38 @@ function set_params_amgs(
     return setlogp!!(vi, lp_proposal)
 end
 
+# Function to set the new parameters (for use with gibbs sampler)
+Turing.Inference.isgibbscomponent(::AMGS_Stopping_Sampler) = true 
+
+# drop space function
+Turing.Inference.drop_space(alg::AMGS_Stopping_Sampler{space,T1,T2,T3,T4,T5,T6,T7}) where {space,T1,T2,T3,T4,T5,T6,T7} = AMGS_Stopping_Sampler{(),T1,T2,T3,T4,T5,T6,T7}(alg.acceptance_rate, alg.convergence_step, alg.max_adapt_period, alg.lower_stopping_accep, alg.upper_stopping_accep, alg.average_interval, alg.use_noise_stabiliser, alg.noise_scaling)
+
+# Get varinfo
+function Turing.Inference.varinfo(state::T) where {T<:AMGSStoppingState}
+    return state.transition.params
+end
+
+
+function Turing.Inference.setparams_varinfo!!(
+    model::DynamicPPL.Model,
+    sampler::Sampler{<:AMGS_Stopping_Sampler},
+    state::AMGSStoppingState,
+    params::AbstractVarInfo,
+)
+
+    # Update the vi
+    vi  = last(DynamicPPL.evaluate!!(model, params, DynamicPPL.leafcontext(model.context)))
+
+    #update the model state
+    new_transition = AdvancedMH.Transition(vi, getlogp(vi), state.transition.accepted)
+    new_state = AMGSStoppingState(new_transition, state.μ, state.kernel, state.step, state.β, state.Δi, state.stopped)
+    
+    # Update the VarInfo with the new log density
+    return new_state
+end
+
+
+
 # Write a function which proposes a new set of parameters
 """
     propose_amgs(rng, vi, model, spl, Σ)
@@ -314,9 +346,7 @@ function AbstractMCMC.step_warmup(
 )
     # If we're doing random walk with a covariance matrix,
     # just link everything before sampling.
-    vis = VarInfo()
-    spl_init = DynamicPPL.initialsampler(spl)
-    model(rng, vis, spl_init)
+    vis = DynamicPPL.default_varinfo(rng, model, spl)
 
     # If there are initial parameters, set them and the logdensity
     if initial_params !== nothing
@@ -420,9 +450,7 @@ function AbstractMCMC.step(
     # If we're doing random walk with a covariance matrix,
     # just link everything before sampling.
 
-    vis = VarInfo()
-    spl_init = DynamicPPL.initialsampler(spl)
-    model(rng, vis, spl_init)
+    vis = DynamicPPL.default_varinfo(rng, model, spl)
 
     # If there are initial parameters, set them and the logdensity
     if initial_params !== nothing
