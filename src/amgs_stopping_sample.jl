@@ -4,7 +4,7 @@
 # Start by defining the sampler
 # Note added the stopping conditions as parameters to the sampler
 # The max number of steps where adaptation occurs, the lower and upper bounds of the acceptance rate to check at each average interval
-struct AMGS_Stopping_Sampler{space, T_accep <: Real, T_conv_step <: Real, T_adapt_period <: Integer, T_accep_l <: Real, T_accep_u <: Real, T_accep_interval <: Integer, T_scale <: Real} <: Turing.InferenceAlgorithm
+struct AMGS_Stopping_Sampler{T_accep <: Real, T_conv_step <: Real, T_adapt_period <: Integer, T_accep_l <: Real, T_accep_u <: Real, T_accep_interval <: Integer, T_scale <: Real} <: Turing.InferenceAlgorithm
     acceptance_rate::T_accep
     convergence_step::T_conv_step
     max_adapt_period::T_adapt_period
@@ -27,7 +27,6 @@ Construct an `AMGS_Stopping_Sampler` object.
 - `lower_stopping_accep::Real`: The lower bound for stopping acceptance rate.
 - `upper_stopping_accep::Real`: The upper bound for stopping acceptance rate.
 - `average_interval::Integer`: The interval for averaging acceptance rates.
-- `space::Tuple`: The parameter space.
 - `noise_stabiliser::Bool`: (Optional) Whether to use a noise stabiliser, defaults to false.
 - `noise_stabiliser_scaling::Real`: (Optional) The scaling of the noise stabiliser, defaults to 1e-6.
 
@@ -40,48 +39,11 @@ function AMGS_Stopping_Sampler(
     max_adapt_period::T3,
     lower_stopping_accep::T4,
     upper_stopping_accep::T5,
-    average_interval::T6,
-    space::Tuple;
-    noise_stabiliser::Bool = false,
-    noise_stabiliser_scaling::T7 = 1e-6
-) where {T1 <: Real, T2 <: Real, T3 <: Integer, T4 <: Real, T5 <: Real, T6 <: Integer, T7<:Real}
-    return AMGS_Stopping_Sampler{space, T1, T2, T3, T4, T5, T6, T7}(acceptance_rate, convergence_step, max_adapt_period, lower_stopping_accep, upper_stopping_accep, average_interval, noise_stabiliser, noise_stabiliser_scaling)
+    average_interval::T6;
+) where {T1 <: Real, T2 <: Real, T3 <: Integer, T4 <: Real, T5 <: Real, T6 <: Integer}
+    return AMGS_Stopping_Sampler{T1, T2, T3, T4, T5, T6, Float64}(acceptance_rate, convergence_step, max_adapt_period, lower_stopping_accep, upper_stopping_accep, average_interval, false, 1e-6)
 end
 
-"""
-    AMGS_Stopping_Sampler(acceptance_rate, convergence_step, max_adapt_period, lower_stopping_accep, upper_stopping_accep, average_interval, space::Symbol...; noise_stabiliser = false, noise_stabiliser_scaling = 1e-6)
-
-Construct an `AMGS_Stopping_Sampler` object with space defined by symbols.
-
-# Arguments
-- `acceptance_rate::Real`: The target acceptance rate.
-- `convergence_step::Real`: A tuning parameter for convergence/step size.
-- `max_adapt_period::Integer`: The maximum adaptation period.
-- `lower_stopping_accep::Real`: The lower bound for stopping acceptance rate.
-- `upper_stopping_accep::Real`: The upper bound for stopping acceptance rate.
-- `average_interval::Integer`: The interval for averaging acceptance rates.
-- `space::Symbol...`: The parameter space defined by symbols.
-- `noise_stabiliser::Bool`: (Optional) Whether to use a noise stabiliser, defaults to false.
-- `noise_stabiliser_scaling::Real`: (Optional) The scaling of the noise stabiliser, defaults to 1e-6.
-
-# Returns
-An `AMGS_Stopping_Sampler` instance.
-"""
-function AMGS_Stopping_Sampler(
-    acceptance_rate::T1,
-    convergence_step::T2,
-    max_adapt_period::T3,
-    lower_stopping_accep::T4,
-    upper_stopping_accep::T5,
-    average_interval::T6,
-    space::Symbol...;
-    noise_stabiliser::Bool = false,
-    noise_stabiliser_scaling::T7 = 1e-6
-) where {T1 <: Real, T2 <: Real, T3 <: Integer, T4 <: Real, T5 <: Real, T6 <: Integer, T7 <:Real}
-    return AMGS_Stopping_Sampler(acceptance_rate, convergence_step, max_adapt_period, lower_stopping_accep, upper_stopping_accep, average_interval, space; noise_stabiliser = noise_stabiliser, noise_stabiliser_scaling = noise_stabiliser_scaling)
-end
-
-DynamicPPL.getspace(::AMGS_Stopping_Sampler{space, <: Any, <: Any, <: Any, <: Any, <: Any, <: Any, <:Any}) where {space} = space
 DynamicPPL.default_chain_type(sampler::Sampler{<:AMGS_Stopping_Sampler}) = MCMCChains.Chains
 
 # Define the state of the sampler
@@ -249,7 +211,6 @@ function set_params_amgs(
 
     # Update the VarInfo object with the new parameters
     vi = DynamicPPL.unflatten(vi,
-        DynamicPPL.SamplingContext(rng, spl, DynamicPPL.leafcontext(model.context)),
         params)
 
     # Update the VarInfo with the new log density
@@ -258,9 +219,6 @@ end
 
 # Function to set the new parameters (for use with gibbs sampler)
 Turing.Inference.isgibbscomponent(::AMGS_Stopping_Sampler) = true 
-
-# drop space function
-Turing.Inference.drop_space(alg::AMGS_Stopping_Sampler{space,T1,T2,T3,T4,T5,T6,T7}) where {space,T1,T2,T3,T4,T5,T6,T7} = AMGS_Stopping_Sampler{(),T1,T2,T3,T4,T5,T6,T7}(alg.acceptance_rate, alg.convergence_step, alg.max_adapt_period, alg.lower_stopping_accep, alg.upper_stopping_accep, alg.average_interval, alg.use_noise_stabiliser, alg.noise_scaling)
 
 # Get varinfo
 function Turing.Inference.varinfo(state::T) where {T<:AMGSStoppingState}
@@ -354,7 +312,7 @@ function AbstractMCMC.step_warmup(
     end
 
     # Link the variables
-    DynamicPPL.link!!(vis, spl, model)
+    DynamicPPL.link!!(vis, model)
 
     # Get the log density of the current parameters
     lp_old = getlogp(vis)
@@ -458,7 +416,7 @@ function AbstractMCMC.step(
     end
 
     # Link the variables
-    DynamicPPL.link!!(vis, spl, model)
+    DynamicPPL.link!!(vis, model)
 
     # Get the log density of the current parameters
     lp_old = getlogp(vis)
@@ -573,47 +531,11 @@ function DynamicPPL.assume(
     return DynamicPPL.assume(dist, vn, vi)
 end
 
-
-function DynamicPPL.dot_assume(
-    rng,
-    spl::Turing.Sampler{<:AMGS_Stopping_Sampler},
-    dist::MultivariateDistribution,
-    vns::AbstractVector{<:Turing.VarName},
-    var::AbstractMatrix,
-    vi,
-)
-    # DynamicPPL.updategid!.(Ref(vi), vns, Ref(spl))
-    return DynamicPPL.dot_assume(dist, var, vns, vi)
-end
-
-function DynamicPPL.dot_assume(
-    rng,
-    spl::Turing.Sampler{<:AMGS_Stopping_Sampler},
-    dists::Union{Distribution,AbstractArray{<:Distribution}},
-    vns::AbstractArray{<:Turing.VarName},
-    var::AbstractArray,
-    vi,
-)
-    # Just defer to `SampleFromPrior`.
-#    DynamicPPL.updategid!.(Ref(vi), vns, Ref(spl))
-    return DynamicPPL.dot_assume(dists, var, vns, vi)
-end
-
 function DynamicPPL.observe(spl::Turing.Sampler{<:AMGS_Stopping_Sampler}, d::Distribution, value, vi)
     return DynamicPPL.observe(d, value, vi)
 end
 
-function DynamicPPL.dot_observe(
-    spl::Turing.Sampler{<:AMGS_Stopping_Sampler},
-    ds::Union{Distribution,AbstractArray{<:Distribution}},
-    value::AbstractArray,
-    vi,
-)
-    return DynamicPPL.dot_observe(ds, value, vi)
-end
-
 getlogevidence(transitions, sampler::Turing.Sampler{<:AMGS_Stopping_Sampler}, state) = missing
-
 
 function AbstractMCMC.bundle_samples(
     ts::Vector{<:AdvancedMH.AbstractTransition},

@@ -5,7 +5,7 @@
 
 # Start by defining the sampler
 
-struct DRAMGS_Sampler{space, T_accep <: Real, T_conv_step <: Real, T_scale <: Real, T_max_steps <: Int, T_rej_steps <: AbstractVector{<:Real}} <: Turing.InferenceAlgorithm
+struct DRAMGS_Sampler{T_accep <: Real, T_conv_step <: Real, T_scale <: Real, T_max_steps <: Int, T_rej_steps <: AbstractVector{<:Real}} <: Turing.InferenceAlgorithm
     acceptance_rate::T_accep
     convergence_step::T_conv_step
     use_noise_stabiliser::Bool
@@ -16,59 +16,25 @@ end
 
 function DRAMGS_Sampler(
     acceptance_rate::T1,
-    convergence_step::T2,
-    space::Tuple;
-    noise_stabiliser::Bool=false,
-    noise_stabiliser_scaling::T3=1e-6,
-    max_delayed_rejection_steps::T4=3,
-    rejection_step_sizes::T5=fill(1.0, T4)
-) where {T1 <: Real, T2 <: Real, T3 <: Real, T4 <: Int, T5 <: AbstractVector{<:Real}}
-    return DRAMGS_Sampler{space, T1, T2, T3, T4, T5}(acceptance_rate, convergence_step, noise_stabiliser, noise_stabiliser_scaling, max_delayed_rejection_steps, rejection_step_sizes)
+    convergence_step::T2;
+    noise_stabiliser::Bool = false,
+    noise_stabiliser_scaling::T3 = one(T1) * 1e-6,
+    max_delayed_rejection_steps::T4 = 3,
+    rejection_step_sizes::Union{Nothing, AbstractVector{<:Real}} = nothing
+) where {T1 <: Real, T2 <: Real, T3 <: Real, T4 <: Int}
+
+    # Construct default rejection_step_sizes if not provided
+    rejection_steps = rejection_step_sizes === nothing ? fill(1.0, max_delayed_rejection_steps) : rejection_step_sizes
+
+    return DRAMGS_Sampler{T1, T2, T3, T4, typeof(rejection_steps)}(
+        acceptance_rate,
+        convergence_step,
+        noise_stabiliser,
+        noise_stabiliser_scaling,
+        max_delayed_rejection_steps,
+        rejection_steps
+    )
 end
-
-"""
-    DRAMGS_Sampler(acceptance_rate::T1, convergence_step::T2, space::Tuple) where {T1 <: Real, T2 <: Real}
-
-Create a new DRAMGS sampler with the specified acceptance rate, convergence step, and space.
-
-# Arguments
-- `acceptance_rate::T1`: The target acceptance rate for the sampler.
-- `convergence_step::T2`: A tuning parameter for the rate of convergence/step size of the sampler.
-- `space::Tuple`: The parameter space for the sampler.
-"""
-function DRAMGS_Sampler(
-    acceptance_rate::T1,
-    convergence_step::T2,
-    space::Symbol...;
-    kwargs...
-) where {T1 <: Real, T2 <: Real}
-    return DRAMGS_Sampler(acceptance_rate, convergence_step, space; kwargs...)
-end
-
-"""
-    DRAMGS_Sampler(acceptance_rate::T1, convergence_step::T2, noise_stabiliser::Bool, noise_stabiliser_scaling::T3, space::Tuple) where {T1 <: Real, T2 <: Real, T3 <: Real}
-
-Create a new DRAMGS sampler with the specified acceptance rate, convergence step, and space.
-
-# Arguments
-- `acceptance_rate::T1`: The target acceptance rate for the sampler.
-- `convergence_step::T2`: A tuning parameter for the rate of convergence/step size of the sampler.
-- `noise_stabiliser::Bool`: Whether to use a noise stabiliser.
-- `noise_stabiliser_scaling::T3`: The scaling factor for the noise stabiliser.
-- `space::Tuple`: The parameter space for the sampler.
-"""
-function DRAMGS_Sampler(
-    acceptance_rate::T1,
-    convergence_step::T2,
-    noise_stabiliser::Bool,
-    noise_stabiliser_scaling::T3,
-    space::Symbol...;
-) where {T1 <: Real, T2 <: Real, T3 <: Real}
-    return DRAMGS_Sampler(acceptance_rate, convergence_step, space; noise_stabiliser = noise_stabiliser, noise_stabiliser_scaling = noise_stabiliser_scaling)
-end
-
-
-DynamicPPL.getspace(::DRAMGS_Sampler{space, <: Any, <: Any, <: Any, <: Any, <: Any}) where {space} = space
 
 DynamicPPL.default_chain_type(sampler::Sampler{<:DRAMGS_Sampler}) = MCMCChains.Chains
 
@@ -139,7 +105,6 @@ function set_params_amgs(
 
     # Update the VarInfo object with the new parameters
     vi = DynamicPPL.unflatten(vi,
-           DynamicPPL.SamplingContext(rng, spl, DynamicPPL.leafcontext(model.context)),
            params)
 
     # Update the VarInfo with the new log density
@@ -148,20 +113,6 @@ end
 
 # Function to set the new parameters (for use with gibbs sampler)
 Turing.Inference.isgibbscomponent(::DRAMGS_Sampler) = true 
-
-# drop space function
-Turing.Inference.drop_space(alg::DRAMGS_Sampler{space,T1,T2,T3,T4,T5}) where {space,T1,T2,T3,T4,T5} = DRAMGS_Sampler{(),T1,T2,T3,T4,T5}(alg.acceptance_rate, alg.convergence_step, alg.use_noise_stabiliser, alg.noise_scaling, alg.max_delayed_rejection_steps, alg.rejection_step_sizes)
-
-# Get varinfo
-function Turing.Inference.varinfo(state::T) where {T<:AMGSState}
-    # display(state.transition.params)
-    # display(typeof(state.transition.params))
-    return state.transition.params
-end
-# function isgibbscomponent(::T) where {T<:AMGS_Sampler} 
-#     return true
-# end
-
 
 function Turing.Inference.setparams_varinfo!!(
     model::DynamicPPL.Model,
@@ -180,8 +131,6 @@ function Turing.Inference.setparams_varinfo!!(
     # Update the VarInfo with the new log density
     return new_state
 end
-
-
 
 # Write a function which proposes a new set of parameters
 """
@@ -243,7 +192,7 @@ function AbstractMCMC.step_warmup(
     end
 
     # Link the variables
-    DynamicPPL.link!!(vis, spl, model)
+    DynamicPPL.link!!(vis, model)
 
     # Get the log density of the current parameters
     lp_old = getlogp(vis)
@@ -394,7 +343,7 @@ function AbstractMCMC.step(
     end
 
     # Link the variables
-    DynamicPPL.link!!(vis, spl, model)
+    DynamicPPL.link!!(vis, model)
 
     # Get the log density of the current parameters
     lp_old = getlogp(vis)
@@ -411,7 +360,8 @@ function AbstractMCMC.step(
     lp_proposal = getlogp(vis)
 
     # Check whether to accept the new parameters 
-    _, accep = mh_accept_logdens(rng, lp_proposal, lp_old)
+    accep = mh_accept_logdens(rng, lp_proposal, lp_old)
+    prob = exp(min(0.0, (lp_proposal - lp_old)))
 
     # Construct the transition object to be returned
     if !accep
@@ -445,7 +395,7 @@ function AbstractMCMC.step(
     new_state = init_AMGSState(new_trans, new_trans.params[:], Σ)
 
     # Update the kernel and return the new transition and state
-    prob = exp(min(0.0, -(lp_proposal - lp_old)))
+    # prob = exp(min(0.0, -(lp_proposal - lp_old)))
     upd_state = update_kernel(new_state, new_trans, spl, prob)
 
     return new_trans, upd_state
@@ -483,9 +433,6 @@ function AbstractMCMC.step(
     # Check whether to accept the new parameters
     accep = mh_accept_logdens(rng, lp_proposal, lp_old)
     prob = exp(min(0.0, (lp_proposal - lp_old)))
-
-    # Update the kernel and return the new transition and state
-    # prob = exp(min(0.0, (lp_proposal - lp_old)))
 
     # Construct the transition object to be returned
     if !accep
@@ -529,44 +476,9 @@ function DynamicPPL.assume(
     return DynamicPPL.assume(dist, vn, vi)
 end
 
-
-function DynamicPPL.dot_assume(
-    rng,
-    spl::Turing.Sampler{<:DRAMGS_Sampler},
-    dist::MultivariateDistribution,
-    vns::AbstractVector{<:Turing.VarName},
-    var::AbstractMatrix,
-    vi,
-)
-    # DynamicPPL.updategid!.(Ref(vi), vns, Ref(spl))
-    return DynamicPPL.dot_assume(dist, var, vns, vi)
-end
-
-function DynamicPPL.dot_assume(
-    rng,
-    spl::Turing.Sampler{<:DRAMGS_Sampler},
-    dists::Union{Distribution, AbstractArray{<:Distribution}},
-    vns::AbstractArray{<:Turing.VarName},
-    var::AbstractArray,
-    vi,
-)
-    # Just defer to `SampleFromPrior`.
-    # DynamicPPL.updategid!.(Ref(vi), vns, Ref(spl))
-    return DynamicPPL.dot_assume(dists, var, vns, vi)
-end
-
 # Define observe functions for the DRAMGS sampler
 function DynamicPPL.observe(spl::Turing.Sampler{<:DRAMGS_Sampler}, d::Distribution, value, vi)
     return DynamicPPL.observe(d, value, vi)
-end
-
-function DynamicPPL.dot_observe(
-    spl::Turing.Sampler{<:DRAMGS_Sampler},
-    ds::Union{Distribution, AbstractArray{<:Distribution}},
-    value::AbstractArray,
-    vi
-)
-    return DynamicPPL.dot_observe(ds, value, vi)
 end
 
 # Define function to get log evidence

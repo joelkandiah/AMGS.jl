@@ -3,7 +3,7 @@
 
 # Start by defining the sampler
 
-struct AMGS_Sampler{space, T_accep <: Real, T_conv_step <: Real, T_scale <: Real} <: Turing.InferenceAlgorithm
+struct AMGS_Sampler{ T_accep <: Real, T_conv_step <: Real, T_scale <: Real} <: Turing.InferenceAlgorithm
     acceptance_rate::T_accep
     convergence_step::T_conv_step
     use_noise_stabiliser::Bool
@@ -12,56 +12,10 @@ end
 
 function AMGS_Sampler(
     acceptance_rate::T1,
-    convergence_step::T2,
-    space::Tuple;
-    noise_stabiliser::Bool=false,
-    noise_stabiliser_scaling::T3=1e-6
-) where {T1 <: Real, T2 <: Real, T3 <: Real}
-    return AMGS_Sampler{space, T1, T2, T3}(acceptance_rate, convergence_step, noise_stabiliser, noise_stabiliser_scaling)
+    convergence_step::T2;
+) where {T1 <: Real, T2 <: Real}
+    return AMGS_Sampler{T1, T2, Float64}(acceptance_rate, convergence_step, false, 1e-6)
 end
-
-"""
-    AMGS_Sampler(acceptance_rate::T1, convergence_step::T2, space::Tuple) where {T1 <: Real, T2 <: Real}
-
-Create a new AMGS sampler with the specified acceptance rate, convergence step, and space.
-
-# Arguments
-- `acceptance_rate::T1`: The target acceptance rate for the sampler.
-- `convergence_step::T2`: A tuning parameter for the rate of convergence/step size of the sampler.
-- `space::Tuple`: The parameter space for the sampler.
-"""
-function AMGS_Sampler(
-    acceptance_rate::T1,
-    convergence_step::T2,
-    space::Symbol...;
-)  where {T1 <: Real, T2 <: Real}
-    return AMGS_Sampler(acceptance_rate, convergence_step, space)
-end
-
-"""
-    AMGS_Sampler(acceptance_rate::T1, convergence_step::T2, noise_stabiliser::Bool, noise_stabiliser_scaling::T3, space::Tuple) where {T1 <: Real, T2 <: Real, T3 <: Real}
-
-Create a new AMGS sampler with the specified acceptance rate, convergence step, noise stabiliser, and space.
-
-# Arguments
-- `acceptance_rate::T1`: The target acceptance rate for the sampler.
-- `convergence_step::T2`: A tuning parameter for the rate of convergence/step size of the sampler.
-- `noise_stabiliser::Bool`: Whether to use a noise stabiliser.
-- `noise_stabiliser_scaling::T3`: The scaling factor for the noise stabiliser.
-- `space::Tuple`: The parameter space for the sampler.
-"""
-function AMGS_Sampler(
-    acceptance_rate::T1,
-    convergence_step::T2,
-    noise_stabiliser::Bool,
-    noise_stabiliser_scaling::T3,
-    space::Symbol...;
-)  where {T1 <: Real, T2 <: Real, T3 <: Real}
-    return AMGS_Sampler(acceptance_rate, convergence_step, space; noise_stabiliser = noise_stabiliser, noise_stabiliser_scaling = noise_stabiliser_scaling)
-end
-
-
-DynamicPPL.getspace(::AMGS_Sampler{space, <: Any, <: Any, <: Any}) where {space} = space
 
 DynamicPPL.default_chain_type(sampler::Sampler{<:AMGS_Sampler}) = MCMCChains.Chains
 
@@ -199,7 +153,6 @@ function set_params_amgs(
 
     # Update the VarInfo object with the new parameters
     vi = DynamicPPL.unflatten(vi,
-           DynamicPPL.SamplingContext(rng, spl, DynamicPPL.leafcontext(model.context)),
            params)
 
     # Update the VarInfo with the new log density
@@ -208,9 +161,6 @@ end
 
 # Function to set the new parameters (for use with gibbs sampler)
 Turing.Inference.isgibbscomponent(::AMGS_Sampler) = true 
-
-# drop space function
-Turing.Inference.drop_space(alg::AMGS_Sampler{space,T1,T2,T3}) where {space,T1,T2,T3} = AMGS_Sampler{(),T1,T2,T3}(alg.acceptance_rate, alg.convergence_step, alg.use_noise_stabiliser, alg.noise_scaling)
 
 # Get varinfo
 function Turing.Inference.varinfo(state::T) where {T<:AMGSState}
@@ -308,7 +258,7 @@ function AbstractMCMC.step_warmup(
     end
 
     # Link the variables
-    DynamicPPL.link!!(vis, spl, model)
+    DynamicPPL.link!!(vis, model)
 
     # Get the log density of the current parameters
     lp_old = getlogp(vis)
@@ -411,7 +361,7 @@ function AbstractMCMC.step(
     end
 
     # Link the variables
-    DynamicPPL.link!!(vis, spl, model)
+    DynamicPPL.link!!(vis, model)
 
     # Get the log density of the current parameters
     lp_old = getlogp(vis)
@@ -502,44 +452,9 @@ function DynamicPPL.assume(
     return DynamicPPL.assume(dist, vn, vi)
 end
 
-
-function DynamicPPL.dot_assume(
-    rng,
-    spl::Turing.Sampler{<:AMGS_Sampler},
-    dist::MultivariateDistribution,
-    vns::AbstractVector{<:Turing.VarName},
-    var::AbstractMatrix,
-    vi,
-)
-    # DynamicPPL.updategid!.(Ref(vi), vns, Ref(spl))
-    return DynamicPPL.dot_assume(dist, var, vns, vi)
-end
-
-function DynamicPPL.dot_assume(
-    rng,
-    spl::Turing.Sampler{<:AMGS_Sampler},
-    dists::Union{Distribution, AbstractArray{<:Distribution}},
-    vns::AbstractArray{<:Turing.VarName},
-    var::AbstractArray,
-    vi,
-)
-    # Just defer to `SampleFromPrior`.
-    # DynamicPPL.updategid!.(Ref(vi), vns, Ref(spl))
-    return DynamicPPL.dot_assume(dists, var, vns, vi)
-end
-
 # Define observe functions for the AMGS sampler
 function DynamicPPL.observe(spl::Turing.Sampler{<:AMGS_Sampler}, d::Distribution, value, vi)
     return DynamicPPL.observe(d, value, vi)
-end
-
-function DynamicPPL.dot_observe(
-    spl::Turing.Sampler{<:AMGS_Sampler},
-    ds::Union{Distribution, AbstractArray{<:Distribution}},
-    value::AbstractArray,
-    vi,
-)
-    return DynamicPPL.dot_observe(ds, value, vi)
 end
 
 # Define function to get log evidence

@@ -3,7 +3,7 @@
 
 # Start by defining the sampler
 
-struct Bayes_AMGS_Sampler{space, T_accep <: Real, T_ν <: Real, T_λ <: Real, T_noise_scaling <: Real} <: Turing.InferenceAlgorithm
+struct Bayes_AMGS_Sampler{T_accep <: Real, T_ν <: Real, T_λ <: Real, T_noise_scaling <: Real} <: Turing.InferenceAlgorithm
     acceptance_rate::T_accep
     ν₀::T_ν
     λ_min::T_λ
@@ -22,7 +22,6 @@ Create a new Bayes AMGS sampler with the specified acceptance rate, ν₀, λ_mi
 - `ν₀::T2`: The initial value for ν.
 - `λ_min::T3`: The minimum value for λ.
 - `f`: A function that takes and returns one integer used in the algorithm to determine the earliest step that information about the kernel is provided (should grow slower than the step, i.e. step - f(step) -> ∞ as step -> ∞).
-- `space::Tuple`: The parameter space for the sampler.
 - `noise_stabiliser::Bool`: (Optional) Whether to use a noise stabiliser, defaults to false.
 - `noise_stabiliser_scaling::Real`: (Optional) The scaling of the noise stabiliser, defaults to 1e-6.
 """
@@ -30,27 +29,11 @@ function Bayes_AMGS_Sampler(
     acceptance_rate::T1,
     ν₀::T2,
     λ_min::T3,
-    f,
-    space::Tuple;
-    noise_stabiliser::Bool = false,
-    noise_stabiliser_scaling::T4 = 1e-6
-) where {T1 <: Real, T2 <: Real, T3 <: Real, T4 <: Real}
-    return Bayes_AMGS_Sampler{space, T1, T2, T3, T4}(acceptance_rate, ν₀, λ_min, f, noise_stabiliser, noise_stabiliser_scaling)
+    f;
+) where {T1 <: Real, T2 <: Real, T3 <: Real}
+    return Bayes_AMGS_Sampler{T1, T2, T3, Float64}(acceptance_rate, ν₀, λ_min, f, false, 1e-6)
 end
 
-function Bayes_AMGS_Sampler(
-    acceptance_rate::T1,
-    ν₀::T2,
-    λ_min::T3,
-    f,
-    space::Symbol...;
-    noise_stabiliser::Bool = false,
-    noise_stabiliser_scaling::T4 = 1e-6
-)  where {T1 <: Real, T2 <: Real, T3 <: Real, T4 <: Real}
-    return Bayes_AMGS_Sampler(acceptance_rate, ν₀, λ_min, f, space; noise_stabiliser = noise_stabiliser, noise_stabiliser_scaling = noise_stabiliser_scaling)
-end
-
-DynamicPPL.getspace(::Bayes_AMGS_Sampler{space, <: Any, <: Any, <: Any, <:Any}) where {space} = space
 DynamicPPL.default_chain_type(sampler::Sampler{<:Bayes_AMGS_Sampler}) = MCMCChains.Chains
 
 # Define the state of the sampler
@@ -238,7 +221,6 @@ function set_params_bayes_amgs(
 
     # Update the VarInfo object with the new parameters
     vi = DynamicPPL.unflatten(vi,
-        DynamicPPL.SamplingContext(rng, spl, DynamicPPL.leafcontext(model.context)),
         params)
 
     # Update the VarInfo with the new log density
@@ -248,9 +230,6 @@ end
 
 # Function to set the new parameters (for use with gibbs sampler)
 Turing.Inference.isgibbscomponent(::Bayes_AMGS_Sampler) = true 
-
-# drop space function
-Turing.Inference.drop_space(alg::Bayes_AMGS_Sampler{space,T1,T2,T3,T4}) where {space,T1,T2,T3,T4} = Bayes_AMGS_Sampler{(),T1,T2,T3,T4}(alg.acceptance_rate, alg.ν₀, alg.λ_min, alg.f, alg.use_noise_stabiliser, alg.noise_scaling)
 
 # Get varinfo
 function Turing.Inference.varinfo(state::T) where {T<:BayesAMGSState}
@@ -341,7 +320,7 @@ function AbstractMCMC.step_warmup(
     end
 
     # Link the variables
-    DynamicPPL.link!!(vis, spl, model)
+    DynamicPPL.link!!(vis, model)
 
     # Get the log density of the current parameters
     lp_old = getlogp(vis)
@@ -449,7 +428,7 @@ function AbstractMCMC.step(
         vis = set_params_bayes_amgs(rng, vis, model, spl, initial_params)
     end
 
-    DynamicPPL.link!!(vis, spl, model)
+    DynamicPPL.link!!(vis, model)
 
     lp_old = getlogp(vis)
     prev_transition = AdvancedMH.Transition(vis, lp_old, false)
@@ -533,43 +512,8 @@ function DynamicPPL.assume(
     return DynamicPPL.assume(dist, vn, vi)
 end
 
-
-function DynamicPPL.dot_assume(
-    rng,
-    spl::Turing.Sampler{<:Bayes_AMGS_Sampler},
-    dist::MultivariateDistribution,
-    vns::AbstractVector{<:Turing.VarName},
-    var::AbstractMatrix,
-    vi,
-)
-    # DynamicPPL.updategid!.(Ref(vi), vns, Ref(spl))
-    return DynamicPPL.dot_assume(dist, var, vns, vi)
-end
-
-function DynamicPPL.dot_assume(
-    rng,
-    spl::Turing.Sampler{<:Bayes_AMGS_Sampler},
-    dists::Union{Distribution,AbstractArray{<:Distribution}},
-    vns::AbstractArray{<:Turing.VarName},
-    var::AbstractArray,
-    vi,
-)
-    # Just defer to `SampleFromPrior`.
-#    DynamicPPL.updategid!.(Ref(vi), vns, Ref(spl))
-    return DynamicPPL.dot_assume(dists, var, vns, vi)
-end
-
 function DynamicPPL.observe(spl::Turing.Sampler{<:Bayes_AMGS_Sampler}, d::Distribution, value, vi)
     return DynamicPPL.observe(d, value, vi)
-end
-
-function DynamicPPL.dot_observe(
-    spl::Turing.Sampler{<:Bayes_AMGS_Sampler},
-    ds::Union{Distribution,AbstractArray{<:Distribution}},
-    value::AbstractArray,
-    vi,
-)
-    return DynamicPPL.dot_observe(ds, value, vi)
 end
 
 getlogevidence(transitions, sampler::Turing.Sampler{<:Bayes_AMGS_Sampler}, state) = missing

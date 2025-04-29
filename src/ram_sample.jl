@@ -3,7 +3,7 @@
 
 # Start by defining the sampler
 
-struct RAM_Sampler{space, T_accep <: Real, T_conv_step <: Real, T_lb_eig <: Real, T_ub_eig <: Real} <: Turing.InferenceAlgorithm
+struct RAM_Sampler{T_accep <: Real, T_conv_step <: Real, T_lb_eig <: Real, T_ub_eig <: Real} <: Turing.InferenceAlgorithm
     acceptance_rate::T_accep
     convergence_step::T_conv_step
     lb_eig::T_lb_eig
@@ -19,34 +19,17 @@ Create a new RAM sampler with the specified acceptance rate, convergence step, a
 # Arguments
 - `acceptance_rate::T1`: The target acceptance rate for the sampler.
 - `convergence_step::T2`: A tuning parameter for the rate of convergence/step size of the sampler.
-- `space::Tuple`: The parameter space for the sampler.
 - `lb_eig::T3`: The lower bound for the eigenvalues for the acceptance of the kernel (default: -Inf).
 - `ub_eig::T4`: The upper bound for the eigenvalues for the acceptance of the kernel (default: Inf).
 - `bound_eigs::Bool`: Whether to bound the eigenvalues (default: false).
 """
 function RAM_Sampler(
     acceptance_rate::T1,
-    convergence_step::T2,
-    space::Tuple;
-    lb_eig::T3 = -Inf,
-    ub_eig::T4 = Inf,
-    bound_eigs::Bool = false,
-) where {T1 <: Real, T2 <: Real, T3 <: Real, T4 <: Real}
-    return RAM_Sampler{space, T1, T2, T3, T4}(acceptance_rate, convergence_step, lb_eig, ub_eig, bound_eigs)
+    convergence_step::T2;
+) where {T1 <: Real, T2 <: Real}
+    return RAM_Sampler{T1, T2, Float64, Float64}(acceptance_rate, convergence_step, -Inf, Inf, false)
 end
 
-function RAM_Sampler(
-    acceptance_rate::T1,
-    convergence_step::T2,
-    space::Symbol...;
-    lb_eig::T3 = -Inf,
-    ub_eig::T4 = Inf,
-    bound_eigs::Bool = false,
-)  where {T1 <: Real, T2 <: Real, T3 <: Real, T4 <: Real}
-    return RAM_Sampler(acceptance_rate, convergence_step, space; lb_eig = lb_eig, ub_eig = ub_eig, bound_eigs = bound_eigs)
-end
-
-DynamicPPL.getspace(::RAM_Sampler{space, <: Any, <: Any, <: Any, <: Any}) where {space} = space
 DynamicPPL.default_chain_type(sampler::Sampler{<:RAM_Sampler}) = MCMCChains.Chains
 
 # Define the state of the sampler
@@ -158,7 +141,6 @@ function set_params_ram(
 
     # Update the VarInfo object with the new parameters
     vi = DynamicPPL.unflatten(vi,
-        DynamicPPL.SamplingContext(rng, spl, DynamicPPL.leafcontext(model.context)),
         params)
 
     # Update the VarInfo with the new log density
@@ -168,23 +150,14 @@ end
 # Function to set the new parameters (for use with gibbs sampler)
 Turing.Inference.isgibbscomponent(::RAM_Sampler) = true 
 
-# drop space function
-Turing.Inference.drop_space(alg::RAM_Sampler{space,T1,T2,T3,T4}) where {space,T1,T2,T3,T4} = RAM_Sampler{(),T1,T2,T3,T4}(alg.acceptance_rate, alg.convergence_step, alg.lb_eig, alg.ub_eig, alg.bound_eigs)
-
 # Get varinfo
 function Turing.Inference.varinfo(state::T) where {T<:RAMState}
-    # display(state.transition.params)
-    # display(typeof(state.transition.params))
     return state.transition.params
 end
-# function isgibbscomponent(::T) where {T<:AMGS_Sampler} 
-#     return true
-# end
 
 
 function Turing.Inference.setparams_varinfo!!(
     model::DynamicPPL.Model,
-    sampler::Sampler{<:RAM_Sampler},
     state::RAMState,
     params::AbstractVarInfo,
 )
@@ -261,7 +234,7 @@ function AbstractMCMC.step_warmup(
     end
 
     # Link the variables
-    DynamicPPL.link!!(vis, spl, model)
+    DynamicPPL.link!!(vis, model)
 
     # Get the log density of the current parameters
     lp_old = getlogp(vis)
@@ -364,7 +337,7 @@ function AbstractMCMC.step(
     end
 
     # Link the variables
-    DynamicPPL.link!!(vis, spl, model)
+    DynamicPPL.link!!(vis, model)
 
     # Get the log density of the current parameters
     lp_old = getlogp(vis)
@@ -455,43 +428,9 @@ function DynamicPPL.assume(
     return DynamicPPL.assume(dist, vn, vi)
 end
 
-function DynamicPPL.dot_assume(
-    rng,
-    spl::Turing.Sampler{<:RAM_Sampler},
-    dist::MultivariateDistribution,
-    vns::AbstractVector{<:Turing.VarName},
-    var::AbstractMatrix,
-    vi,
-)
-    # DynamicPPL.updategid!.(Ref(vi), vns, Ref(spl))
-    return DynamicPPL.dot_assume(dist, var, vns, vi)
-end
-
-function DynamicPPL.dot_assume(
-    rng,
-    spl::Turing.Sampler{<:RAM_Sampler},
-    dists::Union{Distribution, AbstractArray{<:Distribution}},
-    vns::AbstractArray{<:Turing.VarName},
-    var::AbstractArray,
-    vi,
-)
-    # Just defer to `SampleFromPrior`.
-    # DynamicPPL.updategid!.(Ref(vi), vns, Ref(spl))
-    return DynamicPPL.dot_assume(dists, var, vns, vi)
-end
-
 # Define observe functions for the RAM sampler
 function DynamicPPL.observe(spl::Turing.Sampler{<:RAM_Sampler}, d::Distribution, value, vi)
     return DynamicPPL.observe(d, value, vi)
-end
-
-function DynamicPPL.dot_observe(
-    spl::Turing.Sampler{<:RAM_Sampler},
-    ds::Union{Distribution, AbstractArray{<:Distribution}},
-    value::AbstractArray,
-    vi,
-)
-    return DynamicPPL.dot_observe(ds, value, vi)
 end
 
 # Define function to get log evidence
