@@ -90,7 +90,7 @@ Initialize the `AMGSStoppingState` object.
 - `transition::AdvancedMH.AbstractTransition`: The initial transition object.
 - `μ::Vector{<:Real}`: The initial mean vector.
 - `kernel::Matrix{<:Real}`: The initial kernel matrix.
-- `sampler::Turing.Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
+- `sampler::DynamicPPL.Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
 
 # Returns
 An `AMGSStoppingState` instance.
@@ -99,7 +99,7 @@ function init_AMGSStoppingState(
     transition::T_trans,
     μ::Vector{T_μ},
     kernel::T_kernel,
-    sampler::Turing.Sampler{<:AMGS_Stopping_Sampler}
+    sampler::DynamicPPL.Sampler{<:AMGS_Stopping_Sampler}
 ) where {T_trans <: AdvancedMH.AbstractTransition, T_μ <: Real, T_kernel <: Matrix}
     ## copy vector length of mu and initialise zero vector for beta
     step = 1
@@ -119,7 +119,7 @@ Initialize the `AMGSStoppingState` object for a 1D case.
 - `transition::AdvancedMH.AbstractTransition`: The initial transition object.
 - `μ::Real`: The initial mean value.
 - `kernel::Matrix{<:Real}`: The initial kernel matrix.
-- `sampler::Turing.Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
+- `sampler::DynamicPPL.Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
 
 # Returns
 An `AMGSStoppingState` instance.
@@ -128,7 +128,7 @@ function init_AMGSStoppingState(
     transition::T_trans,
     μ::T_μ,
     kernel::T_kernel,
-    sampler::Turing.Sampler{<:AMGS_Stopping_Sampler}
+    sampler::DynamicPPL.Sampler{<:AMGS_Stopping_Sampler}
 ) where {T_trans <: AdvancedMH.AbstractTransition, T_μ <: Real, T_kernel <: Matrix}
     ## copy vector length of mu and initialise zero vector for beta
     step = 1
@@ -147,7 +147,7 @@ Update the kernel matrix, mean vector, and other internal quantities of the `AMG
 # Arguments
 - `state::AMGSStoppingState`: The current state of the sampler.
 - `trans::AdvancedMH.Transition`: The new transition object.
-- `spl::Turing.Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
+- `spl::DynamicPPL.Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
 - `prob::Real`: The acceptance probability.
 
 # Returns
@@ -183,7 +183,7 @@ Set the parameters and log density in the `VarInfo` object for the AMGS Stopping
 - `rng::AbstractRNG`: The random number generator.
 - `vi::AbstractVarInfo`: The variable information object.
 - `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::Turing.Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
+- `spl::DynamicPPL.Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
 - `params::Vector{<:Real}`: The new parameters.
 
 # Returns
@@ -221,7 +221,7 @@ end
 Turing.Inference.isgibbscomponent(::AMGS_Stopping_Sampler) = true 
 
 # Get varinfo
-function Turing.Inference.varinfo(state::T) where {T<:AMGSStoppingState}
+function get_varinfo(state::T) where {T<:AMGSStoppingState}
     return state.transition.params
 end
 
@@ -256,7 +256,7 @@ Propose a new set of parameters using a random walk proposal with the given cova
 - `rng::AbstractRNG`: The random number generator.
 - `vi::AbstractVarInfo`: The variable information object.
 - `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::Turing.Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
+- `spl::DynamicPPL.Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
 - `Σ::AbstractMatrix{<:Real}`: The covariance matrix for the proposal.
 
 # Returns
@@ -288,7 +288,7 @@ Perform an initial warmup step for the AMGS Stopping sampler.
 # Arguments
 - `rng::AbstractRNG`: The random number generator.
 - `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::Turing.Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
+- `spl::DynamicPPL.Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
 - `initial_params`: (Optional) The initial parameters.
 - `kwargs...`: Additional keyword arguments.
 
@@ -525,22 +525,18 @@ function AbstractMCMC.step(
 end
 
 function DynamicPPL.assume(
-    rng::Random.AbstractRNG, spl::Turing.Sampler{<:AMGS_Stopping_Sampler}, dist::Distribution, vn::T_VN, vi
-) where {T_VN <: Turing.VarName}
+    rng::Random.AbstractRNG, spl::DynamicPPL.Sampler{<:AMGS_Stopping_Sampler}, dist::Distribution, vn::T_VN, vi
+) where {T_VN <: DynamicPPL.VarName}
     # DynamicPPL.updategid!(vi, vn, spl)
     return DynamicPPL.assume(dist, vn, vi)
 end
 
-function DynamicPPL.observe(spl::Turing.Sampler{<:AMGS_Stopping_Sampler}, d::Distribution, value, vi)
-    return DynamicPPL.observe(d, value, vi)
-end
-
-getlogevidence(transitions, sampler::Turing.Sampler{<:AMGS_Stopping_Sampler}, state) = missing
+getlogevidence(transitions, sampler::DynamicPPL.Sampler{<:AMGS_Stopping_Sampler}, state) = missing
 
 function AbstractMCMC.bundle_samples(
     ts::Vector{<:AdvancedMH.AbstractTransition},
     model::AbstractMCMC.AbstractModel,
-    spl::Turing.Sampler{<:AMGS_Stopping_Sampler},
+    spl::DynamicPPL.Sampler{<:AMGS_Stopping_Sampler},
     state,
     chain_type::Type{MCMCChains.Chains};
     save_state=false,

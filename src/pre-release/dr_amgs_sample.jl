@@ -1,8 +1,6 @@
 #  write a functions step and step_warmup which are used in the DRAMGS_sampler.
 # Based on Algorithm from https://arxiv.org/pdf/2010.04190
 
-#TODO: Test which probability should be used to update the scaling parameter (maybe after initial sample???)
-
 # Start by defining the sampler
 
 struct DRAMGS_Sampler{T_accep <: Real, T_conv_step <: Real, T_scale <: Real, T_max_steps <: Int, T_rej_steps <: AbstractVector{<:Real}} <: Turing.InferenceAlgorithm
@@ -52,22 +50,26 @@ Update the kernel matrix, and internal quantities of the AMGS sampler state base
 """
 function update_kernel(state::AMGSState, trans::T, spl::Sampler{<:DRAMGS_Sampler}, prob::T3) where {T <: AdvancedMH.Transition, T3 <: Real}
     # Grab useful quantities from the state
-    Σ = state.kernel
     μ = state.μ
     step = state.step
+    θ = trans.params[:]
 
     # Follow maths from arXiv paper to update the kernel and the global scale β
-    β = state.β
     η = (step + 1.0)^(-spl.alg.convergence_step)
-    new_β = β + η * (prob - spl.alg.acceptance_rate)
-    Δ = trans.params[:] - μ
-    new_μ = (1.0 - η) * μ + (η * trans.params[:])
+    β = state.β + η * (prob - spl.alg.acceptance_rate)
+    map!((x,y) -> ((1.0 -η) * x + (η * y)), μ, μ, θ) 
+    map!(-, θ, θ, μ)
+    # Δ = trans.params[:] - μ
+    Δ² = θ * transpose(θ) # This is the outer product of the parameter vector with itself
+    # new_μ = (1.0 - η) * μ + (η * trans.params[:])
     
     # Add noise to the kernel if requested
-    noise_term = spl.alg.use_noise_stabiliser * spl.alg.noise_scaling * η * rand(size(Δ)[1])
-    new_Σ = (1.0 - η) * Σ + (η * (Δ * (Δ'))) + diagm(noise_term)
-    new_state = AMGSState(trans, new_μ, new_Σ, step + 1, new_β)
-    return new_state
+    # noise_term = spl.alg.use_noise_stabiliser * spl.alg.noise_scaling * η * rand(size(Δ)[1])
+    Δ² .= Δ² .+ (spl.alg.use_noise_stabiliser .* spl.alg.noise_scaling .* rand(size(θ)[1]))
+    new_Σ = (1.0 - η) * state.kernel + (η * Δ²)
+    # new_Σ = (1.0 - η) * Σ + (η * (Δ * (Δ'))) + diagm(noise_term)
+    new_state = AMGSState(trans, μ, new_Σ, step + 1, β)
+    return new_Σ, new_state
 end
 
 # Function to set the new parameters
@@ -122,7 +124,9 @@ function Turing.Inference.setparams_varinfo!!(
 )
 
     # Update the vi
-    vi  = last(DynamicPPL.evaluate!!(model, params, DynamicPPL.leafcontext(model.context)))
+    vi = state.transition.params
+    vi = DynamicPPL.unflatten(vi, params[:])
+    vi  = last(DynamicPPL.evaluate!!(model, vi, DynamicPPL.leafcontext(model.context)))
 
     #update the model state
     new_transition = AdvancedMH.Transition(vi, getlogp(vi), state.transition.accepted)
@@ -396,7 +400,7 @@ function AbstractMCMC.step(
 
     # Update the kernel and return the new transition and state
     # prob = exp(min(0.0, -(lp_proposal - lp_old)))
-    upd_state = update_kernel(new_state, new_trans, spl, prob)
+    _, upd_state = update_kernel(new_state, new_trans, spl, prob)
 
     return new_trans, upd_state
 end
@@ -462,7 +466,7 @@ function AbstractMCMC.step(
         new_trans = AdvancedMH.Transition(vis, lp_proposal, true)
     end
     
-    new_state = update_kernel(state, new_trans, spl, prob)
+    _, new_state = update_kernel(state, new_trans, spl, prob)
 
     return new_trans, new_state
 end
@@ -470,29 +474,24 @@ end
 
 # Define assume functions for the DRAMGS sampler
 function DynamicPPL.assume(
-    rng::Random.AbstractRNG, spl::Turing.Sampler{<:DRAMGS_Sampler}, dist::Distribution, vn::Turing.VarName, vi
+    rng::Random.AbstractRNG, spl::DynamicPPL.Sampler{<:DRAMGS_Sampler}, dist::Distribution, vn::DynamicPPL.VarName, vi
 )
     # DynamicPPL.updategid!(vi, vn, spl)
     return DynamicPPL.assume(dist, vn, vi)
 end
 
-# Define observe functions for the DRAMGS sampler
-function DynamicPPL.observe(spl::Turing.Sampler{<:DRAMGS_Sampler}, d::Distribution, value, vi)
-    return DynamicPPL.observe(d, value, vi)
-end
-
 # Define function to get log evidence
-getlogevidence(transitions, sampler::Turing.Sampler{<:DRAMGS_Sampler}, state) = missing
+getlogevidence(transitions, sampler::DynamicPPL.Sampler{<:DRAMGS_Sampler}, state) = missing
 
 """
-    AbstractMCMC.bundle_samples(ts::Vector{<:AdvancedMH.AbstractTransition}, model::AbstractMCMC.AbstractModel, spl::Turing.Sampler{<:DRAMGS_Sampler}, state, chain_type::Type{MCMCChains.Chains}; save_state=false, stats=missing, sort_chain=false, include_varname_to_symbol=true, discard_initial=0, thinning=1, kwargs...)
+    AbstractMCMC.bundle_samples(ts::Vector{<:AdvancedMH.AbstractTransition}, model::AbstractMCMC.AbstractModel, spl::DynamicPPL.Sampler{<:DRAMGS_Sampler}, state, chain_type::Type{MCMCChains.Chains}; save_state=false, stats=missing, sort_chain=false, include_varname_to_symbol=true, discard_initial=0, thinning=1, kwargs...)
 
 Bundle the samples from the DRAMGS sampler into an MCMCChains Chain.
 
 # Arguments
 - `ts::Vector{<:AdvancedMH.AbstractTransition}`: The Vector of transitions.
 - `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::Turing.Sampler{<:DRAMGS_Sampler}`: The DRAMGS sampler.
+- `spl::DynamicPPL.Sampler{<:DRAMGS_Sampler}`: The DRAMGS sampler.
 - `state`: The current state of the sampler.
 - `chain_type::Type{MCMCChains.Chains}`: The type of chain.
 - `save_state`: Whether to save the state (default: false).
@@ -506,7 +505,7 @@ Bundle the samples from the DRAMGS sampler into an MCMCChains Chain.
 function AbstractMCMC.bundle_samples(
     ts::Vector{<:AdvancedMH.AbstractTransition},
     model::AbstractMCMC.AbstractModel,
-    spl::Turing.Sampler{<:DRAMGS_Sampler},
+    spl::DynamicPPL.Sampler{<:DRAMGS_Sampler},
     state,
     chain_type::Type{MCMCChains.Chains};
     save_state=false,

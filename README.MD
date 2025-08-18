@@ -34,7 +34,7 @@ model_sample = demo(1.5, 2.0)
 
 # Create an AMGS sampler
 myamgs = AMGS.AMGS_Sampler(0.234, 0.6)
-spl_myamgs = Turing.Sampler(myamgs)
+spl_myamgs = DynamicPPL.Sampler(myamgs)
 
 # Perform inference
 Random.seed!(1234)
@@ -54,7 +54,7 @@ Here is an example of how to use a Bayes AMGS sampler:
 ```julia
 # Create a Bayes AMGS sampler
 mybayesamgs = AMGS.Bayes_AMGS_Sampler(0.234, 1.0, 0.1, x -> x ÷ 2)
-spl_mybayesamgs = Turing.Sampler(mybayesamgs)
+spl_mybayesamgs = DynamicPPL.Sampler(mybayesamgs)
 
 # Perform inference
 Random.seed!(1234)
@@ -74,7 +74,7 @@ Here is an example of how to use an AMGS stopping sampler:
 ```julia
 # Create an AMGS stopping sampler
 myamgs_stopping = AMGS.AMGS_Stopping_Sampler(0.234, 0.6, 2000, 0.231, 0.237, 600)
-spl_myamgs_stopping = Turing.Sampler(myamgs_stopping)
+spl_myamgs_stopping = DynamicPPL.Sampler(myamgs_stopping)
 
 # Perform inference
 Random.seed!(1234)
@@ -94,7 +94,7 @@ Here is an example of how to use a RAM sampler:
 ```julia
 # Create a RAM sampler
 myram = AMGS.RAM_Sampler(0.234, 0.6)
-spl_myram = Turing.Sampler(myram)
+spl_myram = DynamicPPL.Sampler(myram)
 
 # Perform inference
 Random.seed!(1234)

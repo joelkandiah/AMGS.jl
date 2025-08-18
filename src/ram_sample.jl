@@ -151,7 +151,7 @@ end
 Turing.Inference.isgibbscomponent(::RAM_Sampler) = true 
 
 # Get varinfo
-function Turing.Inference.varinfo(state::T) where {T<:RAMState}
+function get_varinfo(state::T) where {T<:RAMState}
     return state.transition.params
 end
 
@@ -422,29 +422,24 @@ end
 
 # Define assume functions for the RAM sampler
 function DynamicPPL.assume(
-    rng::Random.AbstractRNG, spl::Turing.Sampler{<:RAM_Sampler}, dist::Distribution, vn::Turing.VarName, vi
+    rng::Random.AbstractRNG, spl::DynamicPPL.Sampler{<:RAM_Sampler}, dist::Distribution, vn::DynamicPPL.VarName, vi
 )
     # DynamicPPL.updategid!(vi, vn, spl)
     return DynamicPPL.assume(dist, vn, vi)
 end
 
-# Define observe functions for the RAM sampler
-function DynamicPPL.observe(spl::Turing.Sampler{<:RAM_Sampler}, d::Distribution, value, vi)
-    return DynamicPPL.observe(d, value, vi)
-end
-
 # Define function to get log evidence
-getlogevidence(transitions, sampler::Turing.Sampler{<:RAM_Sampler}, state) = missing
+getlogevidence(transitions, sampler::DynamicPPL.Sampler{<:RAM_Sampler}, state) = missing
 
 """
-    AbstractMCMC.bundle_samples(ts::Vector{<:AdvancedMH.AbstractTransition}, model::AbstractMCMC.AbstractModel, spl::Turing.Sampler{<:RAM_Sampler}, state, chain_type::Type{MCMCChains.Chains}; save_state=false, stats=missing, sort_chain=false, include_varname_to_symbol=true, discard_initial=0, thinning=1, kwargs...)
+    AbstractMCMC.bundle_samples(ts::Vector{<:AdvancedMH.AbstractTransition}, model::AbstractMCMC.AbstractModel, spl::DynamicPPL.Sampler{<:RAM_Sampler}, state, chain_type::Type{MCMCChains.Chains}; save_state=false, stats=missing, sort_chain=false, include_varname_to_symbol=true, discard_initial=0, thinning=1, kwargs...)
 
 Bundle the samples from the RAM sampler into an MCMCChains Chain.
 
 # Arguments
 - `ts::Vector{<:AdvancedMH.AbstractTransition}`: The Vector of transitions.
 - `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::Turing.Sampler{<:RAM_Sampler}`: The RAM sampler.
+- `spl::DynamicPPL.Sampler{<:RAM_Sampler}`: The RAM sampler.
 - `state`: The current state of the sampler.
 - `chain_type::Type{MCMCChains.Chains}`: The type of chain.
 - `save_state`: Whether to save the state (default: false).
@@ -458,7 +453,7 @@ Bundle the samples from the RAM sampler into an MCMCChains Chain.
 function AbstractMCMC.bundle_samples(
     ts::Vector{<:AdvancedMH.AbstractTransition},
     model::AbstractMCMC.AbstractModel,
-    spl::Turing.Sampler{<:RAM_Sampler},
+    spl::DynamicPPL.Sampler{<:RAM_Sampler},
     state,
     chain_type::Type{MCMCChains.Chains};
     save_state=false,
