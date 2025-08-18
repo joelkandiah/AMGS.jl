@@ -54,7 +54,7 @@ using AMGS
             # callback = StatesExtractor()
 
             myamgs = AMGS.AMGS_Sampler(0.234, 0.6)
-            spl_myamgs = Turing.Sampler(myamgs)
+            spl_myamgs = DynamicPPL.Sampler(myamgs)
 
             num_warmup = 200
             discard_init = 100
