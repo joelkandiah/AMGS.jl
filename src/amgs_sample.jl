@@ -88,11 +88,11 @@ function init_AMGSState(
 end
 
 # Construct a transition object using our parameters of interest (varinfo instead of params)
-# AdvancedMH.Transition(
+# Turing.Inference.Transition(
 #     params::T_params,
 #     lp::T_lp,
 #     accepted::Bool,
-# ) where {T_params <: AbstractVarInfo, T_lp <: Real} = AdvancedMH.Transition{T_params, T_lp}(params, lp, accepted)
+# ) where {T_params <: AbstractVarInfo, T_lp <: Real} = Turing.Inference.Transition{T_params, T_lp}(params, lp, accepted)
 
 # Write a function which updates the kernel
 """
@@ -132,7 +132,7 @@ Turing.Inference.isgibbscomponent(::AMGS_Sampler) = true
 
 # Get varinfo
 function Turing.Inference.get_varinfo(state::T) where {T<:AMGSState}
-    return state.transition.params
+    return state.varinfo
 end
 
 function Turing.Inference.setparams_varinfo!!(
@@ -167,6 +167,7 @@ Propose a new set of parameters for the AMGS sampler.
 - `vi::AbstractVarInfo`: The variable information.
 - `model::AbstractMCMC.AbstractModel`: The model.
 - `spl::Sampler{<:AMGS_Sampler}`: The AMGS sampler.
+- `state::AMGSState`: The current state of the sampler.
 - `Σ::AbstractMatrix`: The covariance matrix for the proposal.
 """
 function propose_amgs(
@@ -243,7 +244,7 @@ function AbstractMCMC.step_warmup(
     end
 
     # Create a new transition and state object if accepted
-    # trans = AdvancedMH.Transition(vis, lp_proposal, true)
+    # trans = Turing.Inference.Transition(vis, lp_proposal, true)
     # state = init_AMGSState(trans, theta, Σ)
 
     return new_state.transition, new_state 
@@ -272,7 +273,6 @@ function AbstractMCMC.step_warmup(
     vis = state.varinfo
     lp_old = state.logjoint_internal
 
-
     # Get the kernel
     Σ = state.kernel
 
@@ -288,7 +288,7 @@ function AbstractMCMC.step_warmup(
     end
 
     # Create a new transition and state object if accepted
-    # trans = AdvancedMH.Transition(vis, lp_proposal, true)
+    # trans = Turing.Inference.Transition(vis, lp_proposal, true)
     # new_state = AMGSState(trans, state.μ, Σ, state.step, state.β, lp_proposal)
 
     return proposal_state.transition, proposal_state

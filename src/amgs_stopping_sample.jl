@@ -50,7 +50,7 @@ DynamicPPL.default_chain_type(sampler::Sampler{<:AMGS_Stopping_Sampler}) = MCMCC
 # Contains Important quantities for computation of the updated kernel
 # In addition to the AMGSState, we also store the previous accepts as well as whether to adaptation has ended
 """
-    AMGSStoppingState{TTrans<:AdvancedMH.Transition, Tμ<:Vector, TKernel<:Matrix, TStep<:Integer, Tβ<:Real, TΔi<:Vector}
+    AMGSStoppingState{TTrans<:Turing.Inference.Transition, Tμ<:Vector, TKernel<:Matrix, TStep<:Integer, Tβ<:Real, TΔi<:Vector}
 
 The state object for the AMGS Stopping sampler.
 
@@ -64,20 +64,24 @@ The state object for the AMGS Stopping sampler.
 - `stopped::Bool`: Whether the adaptation process has stopped.
 """
 struct AMGSStoppingState{
-    TTrans<:AdvancedMH.Transition,
+    TTrans<:Turing.Inference.Transition,
+    TVI<:AbstractVarInfo,
     Tμ<:Vector,
     TKernel<:Matrix,
     TStep<:Integer,
     Tβ<:Real,
-    TΔi<:Vector
+    TΔi<:Vector,
+    TL<:Real
 }
     transition::TTrans
+    varinfo::TVI
     μ::Tμ
     kernel::TKernel
     step::TStep
     β::Tβ
     Δi::TΔi
     stopped::Bool
+    logjoint_internal::TL
 end
 
 # Define the initial state of the sampler
@@ -87,7 +91,7 @@ end
 Initialize the `AMGSStoppingState` object.
 
 # Arguments
-- `transition::AdvancedMH.AbstractTransition`: The initial transition object.
+- `transition::Turing.Inference.Transition`: The initial transition object.
 - `μ::Vector{<:Real}`: The initial mean vector.
 - `kernel::Matrix{<:Real}`: The initial kernel matrix.
 - `sampler::DynamicPPL.Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
@@ -97,16 +101,17 @@ An `AMGSStoppingState` instance.
 """
 function init_AMGSStoppingState(
     transition::T_trans,
+    varinfo::TVI,
     μ::Vector{T_μ},
     kernel::T_kernel,
     sampler::DynamicPPL.Sampler{<:AMGS_Stopping_Sampler}
-) where {T_trans <: AdvancedMH.AbstractTransition, T_μ <: Real, T_kernel <: Matrix}
+) where {T_trans <: Turing.Inference.Transition, TVI <: AbstractVarInfo, T_μ <: Real, T_kernel <: Matrix}
     ## copy vector length of mu and initialise zero vector for beta
     step = 1
     β = zero(eltype(μ))
     Δi = zeros(eltype(μ), sampler.alg.average_interval)
-
-    AMGSStoppingState{T_trans, Vector{T_μ}, T_kernel, Int, typeof(β), typeof(Δi)}(transition, μ, kernel, step, β, Δi, false)
+    lp = DynamicPPL.getlogjoint_internal(varinfo)
+    AMGSStoppingState{T_trans, TVI, Vector{T_μ}, T_kernel, Int, typeof(β), typeof(Δi), typeof(lp)}(transition, varinfo, μ, kernel, step, β, Δi, false, lp)
 end
 
 # Define the initial state of the sampler in a 1D case
@@ -126,16 +131,18 @@ An `AMGSStoppingState` instance.
 """
 function init_AMGSStoppingState(
     transition::T_trans,
+    varinfo::TVI,
     μ::T_μ,
     kernel::T_kernel,
     sampler::DynamicPPL.Sampler{<:AMGS_Stopping_Sampler}
-) where {T_trans <: AdvancedMH.AbstractTransition, T_μ <: Real, T_kernel <: Matrix}
+) where {T_trans <: Turing.Inference.Transition, TVI <: AbstractVarInfo, T_μ <: Real, T_kernel <: Matrix}
     ## copy vector length of mu and initialise zero vector for beta
     step = 1
     β = zero(typeof(μ))
     μ = [μ]
     Δi = zeros(typeof(μ), sampler.alg.average_interval)
-    AMGSStoppingState{T_trans, typeof(μ), T_kernel, Int, typeof(β),typeof(Δi)}(transition, μ, kernel, step, β, Δi, false)
+    lp = DynamicPPL.getlogjoint_internal(varinfo)
+    AMGSStoppingState{T_trans, TVI, typeof(μ), T_kernel, Int, typeof(β),typeof(Δi), typeof(lp)}(transition, varinfo, μ, kernel, step, β, Δi, false, lp)
 end
 
 # Write a function which updates the kernel
@@ -146,14 +153,14 @@ Update the kernel matrix, mean vector, and other internal quantities of the `AMG
 
 # Arguments
 - `state::AMGSStoppingState`: The current state of the sampler.
-- `trans::AdvancedMH.Transition`: The new transition object.
+- `trans::Turing.Inference.Transition`: The new transition object.
 - `spl::DynamicPPL.Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
 - `prob::Real`: The acceptance probability.
 
 # Returns
 A new `AMGSStoppingState` with updated quantities.
 """
-function update_kernel(state::AMGSStoppingState, trans::T, spl::Sampler{<:AMGS_Stopping_Sampler}, prob::T3) where {T <: AdvancedMH.Transition, T3 <: Real}
+function update_kernel(state::AMGSStoppingState, trans::T, spl::Sampler{<:AMGS_Stopping_Sampler}, prob::T3) where {T <: Turing.Inference.Transition, T3 <: Real}
     # Grab useful quantities from the state
     Σ = state.kernel
     μ = state.μ
@@ -163,58 +170,14 @@ function update_kernel(state::AMGSStoppingState, trans::T, spl::Sampler{<:AMGS_S
     # Follow maths from arXiv paper to update the kernel and the global scale β
     η = (step + 1.0)^(-spl.alg.convergence_step)
     β = β + η * (prob - spl.alg.acceptance_rate)
-    Δ = trans.params[:] - μ
-    μ = (1.0 - η) * μ + (η * trans.params[:])
+    Δ = state.varinfo[:] - μ
+    μ = (1.0 - η) * μ + (η * state.varinfo[:])
     
     # Add noise to the kernel if requested
     noise_term = spl.alg.use_noise_stabiliser * spl.alg.noise_scaling * η * rand(size(Δ)[1])
     Σ = (1.0 - η) * Σ + (η * (Δ * (Δ'))) + diagm(noise_term)
-    new_state = AMGSStoppingState(trans, μ, Σ, step + 1, β, state.Δi, state.stopped)
+    new_state = AMGSStoppingState(trans, state.varinfo, μ, Σ, step + 1, β, state.Δi, state.stopped, state.logjoint_internal)
     return new_state
-end
-
-# Function to set the new parameters
-"""
-    set_params_amgs(rng, vi, model, spl, params)
-
-Set the parameters and log density in the `VarInfo` object for the AMGS Stopping sampler.
-
-# Arguments
-- `rng::AbstractRNG`: The random number generator.
-- `vi::AbstractVarInfo`: The variable information object.
-- `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::DynamicPPL.Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
-- `params::Vector{<:Real}`: The new parameters.
-
-# Returns
-The updated `VarInfo` object with new parameters and log density.
-"""
-function set_params_amgs(
-    rng::AbstractRNG,
-    vi::AbstractVarInfo,
-    model::AbstractMCMC.AbstractModel,
-    spl::Sampler{<:AMGS_Stopping_Sampler},
-    params::Vector{T}
-) where {T <: Real}
-    # Create function to evaluate the model to get the log density using the right context
-    new_ldf = Base.Fix1(
-        Turing.LogDensityProblems.logdensity,
-        Turing.LogDensityFunction(
-            model,
-            vi,
-            DynamicPPL.SamplingContext(rng, spl, DynamicPPL.leafcontext(model.context))
-        )
-    )
-
-    # Evaluate the logdensity for the new params
-    lp_proposal = new_ldf(params)
-
-    # Update the VarInfo object with the new parameters
-    vi = DynamicPPL.unflatten(vi,
-        params)
-
-    # Update the VarInfo with the new log density
-    return setlogp!!(vi, lp_proposal)
 end
 
 # Function to set the new parameters (for use with gibbs sampler)
@@ -222,28 +185,29 @@ Turing.Inference.isgibbscomponent(::AMGS_Stopping_Sampler) = true
 
 # Get varinfo
 function get_varinfo(state::T) where {T<:AMGSStoppingState}
-    return state.transition.params
+    return state.varinfo
 end
-
 
 function Turing.Inference.setparams_varinfo!!(
     model::DynamicPPL.Model,
     sampler::Sampler{<:AMGS_Stopping_Sampler},
     state::AMGSStoppingState,
-    params::AbstractVarInfo,
-)
+    params::TVI,
+    ) where {TVI <: AbstractVarInfo}
 
     # Update the vi
-    vi  = last(DynamicPPL.evaluate!!(model, params, DynamicPPL.leafcontext(model.context)))
+    vi = state.varinfo
+    vi = DynamicPPL.unflatten(vi, params[:])
+    vi  = last(DynamicPPL.evaluate!!(model, vi)) 
 
-    #update the model state
-    new_transition = AdvancedMH.Transition(vi, getlogp(vi), state.transition.accepted)
-    new_state = AMGSStoppingState(new_transition, state.μ, state.kernel, state.step, state.β, state.Δi, state.stopped)
+    lp = DynamicPPL.getlogjoint_internal(vi)
+    # #update the model state
+    new_transition = Turing.Inference.Transition(model, vi, nothing)
+    new_state = AMGSStoppingState(new_transition, vi, state.μ, state.kernel, state.step, state.β, state.Δi, state.stopped, lp) 
     
     # Update the VarInfo with the new log density
     return new_state
 end
-
 
 
 # Write a function which proposes a new set of parameters
@@ -257,6 +221,7 @@ Propose a new set of parameters using a random walk proposal with the given cova
 - `vi::AbstractVarInfo`: The variable information object.
 - `model::AbstractMCMC.AbstractModel`: The model.
 - `spl::DynamicPPL.Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
+- `state::AMGSStoppingState`: The current state of the sampler.
 - `Σ::AbstractMatrix{<:Real}`: The covariance matrix for the proposal.
 
 # Returns
@@ -267,6 +232,7 @@ function propose_amgs(
     vi::AbstractVarInfo,
     model::AbstractMCMC.AbstractModel,
     spl::Sampler{<:AMGS_Stopping_Sampler},
+    state::AMGSStoppingState,
     Σ::AbstractMatrix
 )
     # Grab the parameters we are performing inference on
@@ -275,8 +241,10 @@ function propose_amgs(
     # Propose a new set of parameters
     proposal = proposewalk(rng, θ, Σ)
 
+    proposal_vi = DynamicPPL.unflatten(vi, proposal)
+
     # Call a function to update the varinfo and evaluate the logdensity
-    return set_params_amgs(rng, vi, model, spl, proposal)
+    return Turing.Inference.setparams_varinfo!!(model, spl, state, proposal_vi)
 end
 
 # Write a function which initialises the chain where there are warmup steps
@@ -308,35 +276,37 @@ function AbstractMCMC.step_warmup(
 
     # If there are initial parameters, set them and the logdensity
     if initial_params !== nothing
-        vis = set_params_amgs(rng, vis, model, spl, initial_params)
+        vis = DynamicPPL.initialize_parameters!!(vis, initial_params, model)
+        vis = last(DynamicPPL.evaluate!!(model, vis))
     end
 
     # Link the variables
     DynamicPPL.link!!(vis, model)
+    DynamicPPL.evaluate!!(model, vis)
 
     # Get the log density of the current parameters
-    lp_old = getlogp(vis)
-    prev_transition = AdvancedMH.Transition(vis, lp_old, false)
+    lp_old = DynamicPPL.getlogjoint_internal(vis)
+    prev_transition = Turing.Inference.Transition(model, vis, nothing)
 
     # Get the parameters of interest and create the covariance matrix
     theta = vis[:]
-    Σ = 0.01 .* abs.(diagm(theta)) + (1e-6 * I)
+    Σ = 0.01 .* diagm(abs.(theta)) + (1e-6 * I)
+
+    # get the old state:
+    orig_state = init_AMGSStoppingState(prev_transition, vis, theta, Σ, spl)
 
     # Propose a new set of parameters and grab the log density
-    vis = propose_amgs(rng, vis, model, spl, Σ)
-    lp_proposal = getlogp(vis)
+    new_state = propose_amgs(rng, vis, model, spl, orig_state, Σ)
+    lp_proposal = new_state.logjoint_internal
 
     # Check whether to accept the new parameters and return the previous transition if not
     accep = mh_accept_logdens(rng, lp_proposal, lp_old)
     if !accep
-        return prev_transition, init_AMGSStoppingState(prev_transition, theta, Σ, spl)
+        return prev_transition, orig_state 
     end
 
-    # Create a new transition and state object if accepted
-    trans = AdvancedMH.Transition(vis, lp_proposal, true)
-    state = init_AMGSStoppingState(trans, theta, Σ, spl)
+    return new_state.transition, new_state 
 
-    return trans, state
 end
 
 """
@@ -359,31 +329,23 @@ function AbstractMCMC.step_warmup(
     kwargs...
 )
     # Grab the VarInfo and logdensity of the current parameters
-    vis = state.transition.params
-    lp_old = getlogp(vis)
-
-    # Create a transition object (in case of rejection)
-    prev_transition = AdvancedMH.Transition(vis, lp_old, false)
+    vis = state.varinfo
+    lp_old = state.logjoint_internal
 
     # Get the kernel
     Σ = state.kernel
 
     # Propose the new parameters and get the log density
-    vis = propose_amgs(rng, vis, model, spl, Σ)
-    lp_proposal = getlogp(vis)
+    proposal_state = propose_amgs(rng, vis, model, spl, state, Σ)
+    lp_proposal = proposal_state.logjoint_internal
 
     # Check whether to accept the new parameters and return the previous transition if not
     accep = mh_accept_logdens(rng, lp_proposal, lp_old)
     if !accep
-        new_state = AMGSStoppingState(prev_transition, state.μ, Σ, state.step, state.β, state.Δi, state.stopped)
-        return prev_transition, state
+        return state.transition, state
     end
 
-    # Create a new transition and state object if accepted
-    trans = AdvancedMH.Transition(vis, lp_proposal, true)
-    new_state = AMGSStoppingState(trans, state.μ, Σ, state.step, state.β, state.Δi, state.stopped)
-
-    return trans, new_state
+    return proposal_state.transition, proposal_state
 end
 
 """
@@ -412,23 +374,27 @@ function AbstractMCMC.step(
 
     # If there are initial parameters, set them and the logdensity
     if initial_params !== nothing
-        vis = set_params_amgs(rng, vis, model, spl, initial_params)
-    end
+        vis = DynamicPPL.initialize_parameters!!(vis, initial_params, model)
+        vis = last(DynamicPPL.evaluate!!(model, vis))
+    end    # Link the variables
 
-    # Link the variables
     DynamicPPL.link!!(vis, model)
+    DynamicPPL.evaluate!!(model, vis)
 
     # Get the log density of the current parameters
-    lp_old = getlogp(vis)
-    prev_transition = AdvancedMH.Transition(vis, lp_old, false)
+    lp_old = DynamicPPL.getlogjoint_internal(vis)
+
+    # Create a transition object in case of rejection
+    prev_transition = Turing.Inference.Transition(model, vis, nothing)
 
     # Get the parameters of interest and create the covariance matrix
     theta = vis[:]
-    Σ = 0.01 .* abs.(diagm(theta)) + (1e-6 * I)
+    Σ = 0.01 .* diagm(abs.(theta)) + (1e-6 * I)
 
+    orig_state = init_AMGSStoppingState(prev_transition, vis, theta, Σ, spl) 
     # Propose a new set of parameters and grab the log density
-    vis = propose_amgs(rng, vis, model, spl, Σ)
-    lp_proposal = getlogp(vis)
+    proposal_state = propose_amgs(rng, vis, model, spl, orig_state, Σ)
+    lp_proposal = proposal_state.logjoint_internal
 
     # Check whether to accept the new parameters 
     accep = mh_accept_logdens(rng, lp_proposal, lp_old)
@@ -437,18 +403,15 @@ function AbstractMCMC.step(
     if !accep
         new_trans = prev_transition
     else
-        new_trans = AdvancedMH.Transition(vis, lp_proposal, true)
+        new_trans = proposal_state.transition
     end
-
-    # Construct the initial state of the sampler
-    new_state = init_AMGSStoppingState(new_trans, theta, Σ, spl)
 
     # Update Δi if accepted and there is a non-zero averaging interval
     if accep && spl.alg.average_interval >= 1
         # (Want to update only the Δi[1] element as we can guarantee adaptation has started as long as the averaging interval is greater than 0)
-        new_state_Δi = copy(new_state.Δi)
+        new_state_Δi = copy(proposal_state.Δi)
         new_state_Δi[1] = 1
-        new_state = AMGSStoppingState(new_state.transition, new_state.μ, new_state.kernel, new_state.step, new_state.β, new_state_Δi, new_state.stopped)
+        new_state = AMGSStoppingState(proposal_state.transition, proposal_state.varinfo, proposal_state.μ, proposal_state.kernel, proposal_state.step, proposal_state.β, new_state_Δi, proposal_state.stopped, proposal_state.logjoint_internal)
     end
 
     # Update the kernel and return the new transition and state
@@ -482,24 +445,18 @@ function AbstractMCMC.step(
 )
     # If we're doing random walk with a covariance matrix,
     # just link everything before sampling.
-    vis = state.transition.params
-    lp_old = getlogp(vis)
-    prev_transition = AdvancedMH.Transition(vis, lp_old, false)
+    vis = state.varinfo
+    lp_old = state.logjoint_internal
 
     # Propose the new parameters and get the log density
-    vis = propose_amgs(rng, vis, model, spl, exp(state.β) * state.kernel)
-    lp_proposal = getlogp(vis)
+    proposal_state = propose_amgs(rng, vis, model, spl, state, exp(state.β) * state.kernel)
+    lp_proposal = proposal_state.logjoint_internal
 
     # Check whether to accept the new parameters
     accep = mh_accept_logdens(rng, lp_proposal, lp_old)
 
-    # Construct the transition object to be returned
-    if !accep
-        new_trans = prev_transition
-    else
-        new_trans = AdvancedMH.Transition(vis, lp_proposal, true)
-    end
-
+    new_trans = accep ? proposal_state.transition : state.transition
+        
     # Update Δi with the new acceptance
     upd_Δi = vcat(state.Δi[2:end], [accep])
 
@@ -514,7 +471,7 @@ function AbstractMCMC.step(
             (((state.step + 1) % spl.alg.average_interval) == 0)))
 
     # Create a new state object
-    new_state = AMGSStoppingState(new_trans, state.μ, state.kernel, state.step, state.β, upd_Δi, stopped)
+    new_state = AMGSStoppingState(new_trans, accep ? proposal_state.varinfo : state.varinfo, state.μ, state.kernel, state.step, state.β, upd_Δi, stopped, accep ? proposal_state.logjoint_internal : state.logjoint_internal)
 
     # Update the kernel if adaptation has not stopped
     if !new_state.stopped
@@ -553,7 +510,7 @@ function AbstractMCMC.bundle_samples(
     varnames_symbol = map(Symbol, varnames)
 
     # Get the values of the extra parameters in each transition.
-    extra_params, extra_values = Turing.Inference.get_transition_extras(map(x -> x.params, ts))
+    extra_params, extra_values = Turing.Inference.get_transition_extras(ts)
 
     # Extract names & construct param array.
     nms = [varnames_symbol; extra_params]

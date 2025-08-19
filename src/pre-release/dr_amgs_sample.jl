@@ -38,7 +38,7 @@ DynamicPPL.default_chain_type(sampler::Sampler{<:DRAMGS_Sampler}) = MCMCChains.C
 
 # Write a function which updates the kernel
 """
-    update_kernel(state::AMGSState, trans::T, spl::Sampler{<:DRAMGS_Sampler}, prob::T3) where {T <: AdvancedMH.Transition, T3 <: Real}
+    update_kernel(state::AMGSState, trans::T, spl::Sampler{<:DRAMGS_Sampler}, prob::T3) where {T <: Turing.Inference.Transition, T3 <: Real}
 
 Update the kernel matrix, and internal quantities of the AMGS sampler state based on the new transition and acceptance probability.
 
@@ -48,7 +48,7 @@ Update the kernel matrix, and internal quantities of the AMGS sampler state base
 - `spl::Sampler{<:DRAMGS_Sampler}`: The DRAMGS sampler.
 - `prob::T3`: The acceptance probability.
 """
-function update_kernel(state::AMGSState, trans::T, spl::Sampler{<:DRAMGS_Sampler}, prob::T3) where {T <: AdvancedMH.Transition, T3 <: Real}
+function update_kernel(state::AMGSState, trans::T, spl::Sampler{<:DRAMGS_Sampler}, prob::T3) where {T <: Turing.Inference.Transition, T3 <: Real}
     # Grab useful quantities from the state
     μ = state.μ
     step = state.step
@@ -129,7 +129,7 @@ function Turing.Inference.setparams_varinfo!!(
     vi  = last(DynamicPPL.evaluate!!(model, vi, DynamicPPL.leafcontext(model.context)))
 
     #update the model state
-    new_transition = AdvancedMH.Transition(vi, getlogp(vi), state.transition.accepted)
+    new_transition = Turing.Inference.Transition(vi, getlogp(vi), state.transition.accepted)
     new_state = AMGSState(new_transition, state.μ, state.kernel, state.step, state.β)
     
     # Update the VarInfo with the new log density
@@ -200,7 +200,7 @@ function AbstractMCMC.step_warmup(
 
     # Get the log density of the current parameters
     lp_old = getlogp(vis)
-    prev_transition = AdvancedMH.Transition(vis, lp_old, false)
+    prev_transition = Turing.Inference.Transition(vis, lp_old, false)
 
     # Get the parameters of interest and create the covariance matrix
     theta = vis[:]
@@ -215,7 +215,7 @@ function AbstractMCMC.step_warmup(
     if accep
 
         # Create a new transition and state object if accepted
-        trans = AdvancedMH.Transition(vis, lp_proposal, true)
+        trans = Turing.Inference.Transition(vis, lp_proposal, true)
         state = init_AMGSState(trans, theta, Σ)
 
         return trans, state
@@ -236,7 +236,7 @@ function AbstractMCMC.step_warmup(
             _, accep = mh_dr_accept_logdens(rng, lp_proposal, largest_last_lp, lp_old)
             if accep
                 # Create a new transition and state object if accepted
-                trans = AdvancedMH.Transition(vis, lp_proposal, true)
+                trans = Turing.Inference.Transition(vis, lp_proposal, true)
                 state = init_AMGSState(trans, theta, Σ)
 
                 return trans, state
@@ -272,7 +272,7 @@ function AbstractMCMC.step_warmup(
     lp_old = getlogp(vis)
 
     # Create a transition object (in case of rejection)
-    prev_transition = AdvancedMH.Transition(vis, lp_old, false)
+    prev_transition = Turing.Inference.Transition(vis, lp_old, false)
 
     # Get the kernel
     Σ = state.kernel
@@ -286,7 +286,7 @@ function AbstractMCMC.step_warmup(
     if accep
 
         # Create a new transition and state object if accepted
-        trans = AdvancedMH.Transition(vis, lp_proposal, true)
+        trans = Turing.Inference.Transition(vis, lp_proposal, true)
         state = AMGSState(trans, state.μ, Σ, state.step, state.β)
 
         return trans, state
@@ -307,7 +307,7 @@ function AbstractMCMC.step_warmup(
             _, accep = mh_dr_accept_logdens(rng, lp_proposal, largest_last_lp, lp_old)
             if accep
                 # Create a new transition and state object if accepted
-                trans = AdvancedMH.Transition(vis, lp_proposal, true)
+                trans = Turing.Inference.Transition(vis, lp_proposal, true)
                 state = AMGSState(trans, state.μ, Σ, state.step, state.β)
 
                 return trans, state
@@ -353,7 +353,7 @@ function AbstractMCMC.step(
     lp_old = getlogp(vis)
 
     # Create a transition object in case of rejection
-    prev_transition = AdvancedMH.Transition(vis, lp_old, false)
+    prev_transition = Turing.Inference.Transition(vis, lp_old, false)
 
     # Get the parameters of interest and create the covariance matrix
     theta = vis[:]
@@ -386,13 +386,13 @@ function AbstractMCMC.step(
                 accep = mh_dr_accept_logdens(rng, lp_proposal, largest_last_lp, lp_old)
                 if accep
                     # Create a new transition 
-                    new_trans = AdvancedMH.Transition(vis, lp_proposal, true)
+                    new_trans = Turing.Inference.Transition(vis, lp_proposal, true)
                     break
                 end
             end
         end
     else
-        new_trans = AdvancedMH.Transition(vis, lp_proposal, true)
+        new_trans = Turing.Inference.Transition(vis, lp_proposal, true)
     end
 
     # Construct the initial state of the sampler
@@ -428,7 +428,7 @@ function AbstractMCMC.step(
     # just link everything before sampling.
     vis = state.transition.params
     lp_old = getlogp(vis)
-    prev_transition = AdvancedMH.Transition(vis, lp_old, false)
+    prev_transition = Turing.Inference.Transition(vis, lp_old, false)
 
     # Propose the new parameters and grab the log density
     vis = propose_amgs(rng, vis, model, spl, exp(state.β) * state.kernel)
@@ -457,13 +457,13 @@ function AbstractMCMC.step(
                 _, accep = mh_dr_accept_logdens(rng, lp_proposal, largest_last_lp, lp_old)
                 if accep
                     # Create a new transition 
-                    new_trans = AdvancedMH.Transition(vis, lp_proposal, true)
+                    new_trans = Turing.Inference.Transition(vis, lp_proposal, true)
                     break
                 end
             end
         end
     else
-        new_trans = AdvancedMH.Transition(vis, lp_proposal, true)
+        new_trans = Turing.Inference.Transition(vis, lp_proposal, true)
     end
     
     _, new_state = update_kernel(state, new_trans, spl, prob)

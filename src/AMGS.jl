@@ -29,7 +29,7 @@ include("utils.jl")
 
 # Code for each differnt sampler
 include("amgs_sample.jl")
-#include("amgs_stopping_sample.jl")
+include("amgs_stopping_sample.jl")
 #include("pre-release/dr_amgs_sample.jl")
 #include("pre-release/new_amgs_sample.jl")
 #include("ram_sample.jl")
