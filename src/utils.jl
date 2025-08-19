@@ -50,10 +50,7 @@ function mh_dr_accept_logdens(rng::T, s_prime::T2, s::T2, s0::T2) where {T <:Abs
 end
 
 function getparams(model::DynamicPPL.Model, t)
-    vi = deepcopy(t.params)
-    if DynamicPPL.islinked(vi)
-        DynamicPPL.invlink!!(vi, model)
-    end
+    return t.θ
 end
 
 function _params_to_array(model::DynamicPPL.Model, ts::Vector)
@@ -68,7 +65,7 @@ function _params_to_array(model::DynamicPPL.Model, ts::Vector)
         nms_and_vs = if isempty(vals)
             Tuple{VarName,Any}[]
         else
-            iters = map(DynamicPPL.varname_and_value_leaves, keys(vals), vals[:])
+            iters = map(DynamicPPL.varname_and_value_leaves, keys(vals), values(vals))
             mapreduce(collect, vcat, iters)
         end
         nms = map(first, nms_and_vs)
