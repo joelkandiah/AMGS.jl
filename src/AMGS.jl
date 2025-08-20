@@ -20,7 +20,7 @@ using DataStructures
 export step, step_warmup, bundle_samples, isgibbscomponent, setparams_varinfo!!, drop_space, setparams!!, get_varinfo
 
 # Functions which use a few different MH samplers
-export AMGS_Sampler, AMGS_Stopping_Sampler, RAM_Sampler, Bayes_AMGS_Sampler, DRAMGS_Sampler
+export AMGS_Sampler, AMGS_Stopping_Sampler, RAM_Sampler, Bayes_AMGS_Sampler, DRAMGS_Sampler, new_AMGS_Sampler
 
 export AMGSState
 
@@ -31,7 +31,7 @@ include("utils.jl")
 include("amgs_sample.jl")
 include("amgs_stopping_sample.jl")
 #include("pre-release/dr_amgs_sample.jl")
-#include("pre-release/new_amgs_sample.jl")
+include("pre-release/new_amgs_sample.jl")
 #include("ram_sample.jl")
 #include("bayes_amgs_sample.jl")
 
