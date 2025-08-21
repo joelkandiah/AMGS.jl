@@ -2,7 +2,6 @@ module AMGS
 
 using Turing
 using AbstractMCMC
-using AdvancedMH
 using Random
 using DynamicPPL
 using LinearAlgebra
@@ -32,7 +31,7 @@ include("amgs_sample.jl")
 include("amgs_stopping_sample.jl")
 #include("pre-release/dr_amgs_sample.jl")
 include("pre-release/new_amgs_sample.jl")
-#include("ram_sample.jl")
+include("ram_sample.jl")
 #include("bayes_amgs_sample.jl")
 
 end

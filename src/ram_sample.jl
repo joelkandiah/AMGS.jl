@@ -36,12 +36,16 @@ DynamicPPL.default_chain_type(sampler::Sampler{<:RAM_Sampler}) = MCMCChains.Chai
 # Contains Important quantities for computation of the updated kernel
 struct RAMState{
     TTrans<:Turing.Inference.Transition,
+    TVI<:AbstractVarInfo,
     TKernel<:Cholesky,
     TStep<:Integer,
+    TL<:Real,
 }
     transition::TTrans
+    varinfo::TVI
     kernel::TKernel
     step::TStep
+    logjoint_internal::TL
 end
 
 # Define the initial state of the sampler
@@ -56,11 +60,14 @@ Initialize the state of the RAM sampler with the given transition and kernel mat
 """
 function init_RAMState(
     transition::T_trans,
-    kernel::T_kernel
-) where {T_trans <: AdvancedMH.AbstractTransition, T_kernel <: Cholesky}
+    varinfo::TVI,
+    kernel::T_kernel,
+) where {T_trans <: AdvancedMH.AbstractTransition, TVI<:AbstractVarInfo, T_kernel <: Cholesky}
     # Initialize step
     step = 1
-    RAMState{T_trans, T_kernel, Int}(transition, kernel, step)
+    # Initialize log joint density
+    DynamicPPL.getlogjoint_internal(varinfo)
+    RAMState{T_trans, TVI, T_kernel, Int, typeof(lp)}(transition, varinfo, kernel, step, lp)
 end
 
 # Write a function which updates the kernel
@@ -102,72 +109,35 @@ function update_kernel(state::RAMState, trans::Turing.Inference.Transition, U::T
         )
     end
 
-    new_state = RAMState(trans, S, step + 1)
+    new_state = RAMState(trans, state.varinfo, S, step + 1, state.logjoint_internal)
     return new_state
 end
 
-# Write a function which sets new parameters for varinfo and sets the new log density
-"""
-    set_params_ram(rng::T_rng, vi::AbstractVarInfo, model::AbstractMCMC.AbstractModel, spl::Sampler{<:RAM_Sampler}, params::Vector{T}) where {T <: Real, T_rng <: AbstractRNG}
-
-Set the parameters of the RAM sampler.
-
-# Arguments
-- `rng::T_rng`: The random number generator.
-- `vi::AbstractVarInfo`: The variable information.
-- `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::Sampler{<:RAM_Sampler}`: The RAM sampler.
-- `params::Vector{T}`: The new parameters.
-"""
-function set_params_ram(
-    rng::T_rng,
-    vi::AbstractVarInfo,
-    model::AbstractMCMC.AbstractModel,
-    spl::Sampler{<:RAM_Sampler},
-    params::Vector{T}
-) where {T <: Real, T_rng <: AbstractRNG}
-    # Create function to evaluate the model to get the log density using the right context
-    new_ldf = Base.Fix1(
-        Turing.LogDensityProblems.logdensity,
-        Turing.LogDensityFunction(
-            model,
-            vi,
-            DynamicPPL.SamplingContext(rng, spl, DynamicPPL.leafcontext(model.context))
-        )
-    )
-
-    # Evaluate the logdensity for the new params
-    lp_proposal = new_ldf(params)
-
-    # Update the VarInfo object with the new parameters
-    vi = DynamicPPL.unflatten(vi,
-        params)
-
-    # Update the VarInfo with the new log density
-    return setlogp!!(vi, lp_proposal)
-end
 
 # Function to set the new parameters (for use with gibbs sampler)
 Turing.Inference.isgibbscomponent(::RAM_Sampler) = true 
 
 # Get varinfo
 function get_varinfo(state::T) where {T<:RAMState}
-    return state.transition.params
+    return state.varinfo
 end
 
 
 function Turing.Inference.setparams_varinfo!!(
     model::DynamicPPL.Model,
+    sampler::Sampler{<:RAM_Sampler},
     state::RAMState,
     params::AbstractVarInfo,
 )
-
     # Update the vi
-    vi  = last(DynamicPPL.evaluate!!(model, params, DynamicPPL.leafcontext(model.context)))
+    vi = state.varinfo
+    vi = DynamicPPL.unflatten(vi, params[:])
+    vi  = last(DynamicPPL.evaluate!!(model, vi)) 
 
-    #update the model state
-    new_transition = Turing.Inference.Transition(vi, getlogp(vi), state.transition.accepted)
-    new_state = RAMState(new_transition, state.kernel, state.step)
+    lp = DynamicPPL.getlogjoint_internal(vi)
+    # #update the model state
+    new_transition = Turing.Inference.Transition(model, vi, nothing)
+    new_state = RAMState(new_transition, vi, state.kernel, state.step, lp)
     
     # Update the VarInfo with the new log density
     return new_state
@@ -192,6 +162,7 @@ function propose_RAM(
     vi::AbstractVarInfo,
     model::AbstractMCMC.AbstractModel,
     spl::Sampler{<:RAM_Sampler},
+    state::RAMState,
     S::T
 ) where {T_rng <: AbstractRNG, T <: Cholesky}
     # Grab the parameters we are performing inference on
@@ -199,9 +170,11 @@ function propose_RAM(
 
     # Propose a new set of parameters
     proposal, U = proposewalkram(rng, θ, S.L)
+    # Set the new parameters in the VarInfo
+    proposal_vi = DynamicPPL.unflatten(vi, proposal)
 
     # Call a function to update the varinfo and evaluate the logdensity
-    return set_params_ram(rng, vi, model, spl, proposal), U
+    return Turing.Inference.setparams_varinfo!!(model, spl, state, proposal_vi), U
 end
 
 # Write a function which initialises the chain where there are warmup steps
@@ -230,35 +203,36 @@ function AbstractMCMC.step_warmup(
 
     # If there are initial parameters, set them and the logdensity
     if initial_params !== nothing
-        vis = set_params_ram(rng, vis, model, spl, initial_params)
+        vis = DynamicPPL.initialize_parameters!!(vis, initial_params, model)
+        vis = last(DynamicPPL.evaluate!!(model, vis))
     end
 
     # Link the variables
     DynamicPPL.link!!(vis, model)
+    DynamicPPL.evaluate!!(model, vis)
 
     # Get the log density of the current parameters
-    lp_old = getlogp(vis)
-    prev_transition = Turing.Inference.Transition(vis, lp_old, false)
+    lp_old = DynamicPPL.getlogjoint_internal(vis)
+    prev_transition = Turing.Inference.Transition(model, vis, nothing)
 
     # Get the parameters of interest and create the covariance matrix
     theta = vis[:]
     S = cholesky(0.01 .* abs.(diagm(theta)) + (1e-6 * I))
 
+    # get the old state
+    orig_state = RAMState(prev_transition, vis, S, 1, lp_old)
+
     # Propose a new set of parameters and grab the log density
-    vis, _ = propose_RAM(rng, vis, model, spl, S)
-    lp_proposal = getlogp(vis)
+    new_state, _ = propose_RAM(rng, vis, model, spl, orig_state, S)
+    lp_proposal = new_state.logjoint_internal
 
     # Check whether to accept the new parameters and return the previous transition if not
     accep = mh_accept_logdens(rng, lp_proposal, lp_old)
     if !accep
-        return prev_transition, init_RAMState(prev_transition, S)
+        return prev_transition, orig_state
     end
 
-    # Create a new transition and state object if accepted
-    trans = Turing.Inference.Transition(vis, lp_proposal, true)
-    state = init_RAMState(trans, S)
-
-    return trans, state
+    return new_state.transition, new_state
 end
 
 """
@@ -281,31 +255,27 @@ function AbstractMCMC.step_warmup(
     kwargs...
 )
     # Grab the VarInfo and logdensity of the current parameters
-    vis = state.transition.params
-    lp_old = getlogp(vis)
-
-    # Create a transition object (in case of rejection)
-    prev_transition = Turing.Inference.Transition(vis, lp_old, false)
+    vis = state.varinfo
+    lp_old = state.logjoint_internal
 
     # Get the kernel
     S = state.kernel
 
     # Propose the new parameters and get the log density
-    vis, _ = propose_RAM(rng, vis, model, spl, S)
-    lp_proposal = getlogp(vis)
+    proposal_state, _ = propose_RAM(rng, vis, model, spl, state, S)
+    lp_proposal = proposal_state.logjoint_internal
 
     # Check whether to accept the new parameters and return the previous transition if not
     accep = mh_accept_logdens(rng, lp_proposal, lp_old)
     if !accep
-        new_state = RAMState(prev_transition, S, state.step)
-        return prev_transition, state
+        return state.transition, state
     end
 
     # Create a new transition and state object if accepted
-    trans = Turing.Inference.Transition(vis, lp_proposal, true)
-    new_state = RAMState(trans, S, state.step)
+    # trans = Turing.Inference.Transition(vis, lp_proposal, true)
+    # new_state = RAMState(trans, S, state.step)
 
-    return trans, new_state
+    return proposal_state.transition, proposal_state
 end
 
 """
@@ -333,43 +303,39 @@ function AbstractMCMC.step(
 
     # If there are initial parameters, set them and the logdensity
     if initial_params !== nothing
-        vis = set_params_ram(rng, vis, model, spl, initial_params)
-    end
+        vis = DynamicPPL.initialize_parameters!!(vis, initial_params, model)
+        vis = last(DynamicPPL.evaluate!!(model, vis))
+    end    # Link the variables
 
-    # Link the variables
     DynamicPPL.link!!(vis, model)
+    DynamicPPL.evaluate!!(model, vis)
 
     # Get the log density of the current parameters
-    lp_old = getlogp(vis)
+    lp_old = DynamicPPL.getlogjoint_internal(vis)
 
     # Create a transition object in case of rejection
-    prev_transition = Turing.Inference.Transition(vis, lp_old, false)
+    prev_transition = Turing.Inference.Transition(model, vis, nothing)
 
     # Get the parameters of interest and create the covariance matrix
-    #TODO replace with noise!!!
     theta = vis[:]
     S = cholesky(0.01 .* abs.(diagm(theta)) + (1e-6 * I))
 
+    # Get the old state
+    orig_state = RAMState(prev_transition, vis, S, 1, lp_old)
+
     # Propose a new set of parameters and grab the log density
-    vis, U = propose_RAM(rng, vis, model, spl, S)
-    lp_proposal = getlogp(vis)
+    proposal_state, U = propose_RAM(rng, vis, model, spl, orig_state, S)
+    lp_proposal = proposal_state.logjoint_internal
 
     # Check whether to accept the new parameters 
     accep = mh_accept_logdens(rng, lp_proposal, lp_old)
 
     # Construct the transition object to be returned
-    if !accep
-        new_trans = prev_transition
-    else
-        new_trans = Turing.Inference.Transition(vis, lp_proposal, true)
-    end
-
-    # Construct the initial state of the sampler
-    new_state = init_RAMState(new_trans, S)
+    new_trans = accep ? proposal_state.transition : prev_transition
 
     # Update the kernel and return the new transition and state
     prob = exp(min(0.0, -(lp_proposal - lp_old)))
-    upd_state = update_kernel(new_state, new_trans, U, spl, prob)
+    upd_state = update_kernel(accep ? proposal_state : orig_state, new_trans, U, spl, prob)
 
     return new_trans, upd_state
 end
@@ -393,29 +359,22 @@ function AbstractMCMC.step(
     state::RAMState;
     kwargs...,
 )
-    # If we're doing random walk with a covariance matrix,
-    # just link everything before sampling.
-    vis = state.transition.params
-    lp_old = getlogp(vis)
-    prev_transition = Turing.Inference.Transition(vis, lp_old, false)
+    vis = state.varinfo
+    lp_old = state.logjoint_internal
 
     # Propose the new parameters and grab the log density
-    vis, U = propose_RAM(rng, vis, model, spl, state.kernel)
-    lp_proposal = getlogp(vis)
+    proposal_state, U = propose_RAM(rng, vis, model, spl, state, state.kernel)
+    lp_proposal = proposal_state.logjoint_internal
 
     # Check whether to accept the new parameters
     accep = mh_accept_logdens(rng, lp_proposal, lp_old)
 
     # Construct the transition object to be returned
-    if !accep
-        new_trans = prev_transition
-    else
-        new_trans = Turing.Inference.Transition(vis, lp_proposal, true)
-    end
+    new_trans = accep ? proposal_state.transition : state.transition
 
     # Update the kernel and return the new transition and state
     prob = exp(min(0.0, (lp_proposal - lp_old)))
-    new_state = update_kernel(state, new_trans, U, spl, prob)
+    new_state = update_kernel(accep ? proposal_state : state, new_trans, U, spl, prob)
 
     return new_trans, new_state
 end
@@ -470,7 +429,7 @@ function AbstractMCMC.bundle_samples(
     varnames_symbol = map(Symbol, varnames)
 
     # Get the values of the extra parameters in each transition.
-    extra_params, extra_values = Turing.Inference.get_transition_extras(map(x -> x.params, ts))
+    extra_params, extra_values = Turing.Inference.get_transition_extras(ts)
 
     # Extract names & construct param array.
     nms = [varnames_symbol; extra_params]

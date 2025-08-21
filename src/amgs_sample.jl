@@ -380,8 +380,6 @@ function AbstractMCMC.step(
     state::AMGSState;
     kwargs...
 )
-    # If we're doing random walk with a covariance matrix,
-    # just link everything before sampling.
     vis = state.varinfo
     lp_old = state.logjoint_internal
 
