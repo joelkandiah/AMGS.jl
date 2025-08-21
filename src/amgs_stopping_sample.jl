@@ -121,7 +121,7 @@ end
 Initialize the `AMGSStoppingState` object for a 1D case.
 
 # Arguments
-- `transition::AdvancedMH.AbstractTransition`: The initial transition object.
+- `transition::Turing.Inference.Transition`: The initial transition object.
 - `μ::Real`: The initial mean value.
 - `kernel::Matrix{<:Real}`: The initial kernel matrix.
 - `sampler::DynamicPPL.Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
@@ -491,7 +491,7 @@ end
 getlogevidence(transitions, sampler::DynamicPPL.Sampler{<:AMGS_Stopping_Sampler}, state) = missing
 
 function AbstractMCMC.bundle_samples(
-    ts::Vector{<:AdvancedMH.AbstractTransition},
+    ts::Vector{<:Turing.Inference.Transition},
     model::AbstractMCMC.AbstractModel,
     spl::DynamicPPL.Sampler{<:AMGS_Stopping_Sampler},
     state,

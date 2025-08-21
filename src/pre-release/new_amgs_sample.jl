@@ -53,7 +53,7 @@ end
 
 # Define the initial state of the sampler
 """
-    init_newAMGSState(transition::T_trans, μ::Vector{T_μ}, kernel::T_kernel) where {T_trans <: AdvancedMH.AbstractTransition, T_μ <: Real, T_kernel <: Matrix}
+    init_newAMGSState(transition::T_trans, μ::Vector{T_μ}, kernel::T_kernel) where {T_trans <: Turing.Inference.Transition, T_μ <: Real, T_kernel <: Matrix}
 
 Initialize the state of the AMGS sampler with the given transition, mean vector μ, and kernel matrix.
 
@@ -76,7 +76,7 @@ function init_newAMGSState(
 end
 
 """
-    init_newAMGSState(transition::T_trans, μ::T_μ, kernel::T_kernel) where {T_trans <: AdvancedMH.AbstractTransition, T_μ <: Real, T_kernel <: Matrix}
+    init_newAMGSState(transition::T_trans, μ::T_μ, kernel::T_kernel) where {T_trans <: Turing.Inference.Transition, T_μ <: Real, T_kernel <: Matrix}
 
 Initialize the state of the AMGS sampler with the given transition, mean value μ, and kernel matrix for a 1D case.
 
@@ -110,13 +110,13 @@ add noise to the kernel matrix Δ² based on the noise scaling and whether noise
 - `θ_size`: The size of the parameter vector θ.
 - `use_noise_stabiliser`: A boolean indicating whether to use noise stabilisation.
 """
-function _add_noise!(Δ², noise_scaling, θ_size, ::Val{true})
-    Δ² .= Δ² .+ diagm(noise_scaling .* rand(θ_size))
-end
+# function _add_noise!(Δ², noise_scaling, θ_size, ::Val{true})
+#    Δ² .= Δ² .+ diagm(noise_scaling .* rand(θ_size))
+#end
 
-function _add_noise!(Δ², noise_scaling, θ_size, ::Val{false})
-    # Do nothing
-end
+#function _add_noise!(Δ², noise_scaling, θ_size, ::Val{false})
+#    # Do nothing
+#end
 
 # Write a function which updates the kernel
 """
@@ -459,12 +459,12 @@ end
 getlogevidence(transitions, sampler::DynamicPPL.Sampler{<:new_AMGS_Sampler}, state) = missing
 
 """
-    AbstractMCMC.bundle_samples(ts::Vector{<:AdvancedMH.AbstractTransition}, model::AbstractMCMC.AbstractModel, spl::DynamicPPL.Sampler{<:new_AMGS_Sampler}, state, chain_type::Type{MCMCChains.Chains}; save_state=false, stats=missing, sort_chain=false, include_varname_to_symbol=true, discard_initial=0, thinning=1, kwargs...)
+    AbstractMCMC.bundle_samples(ts::Vector{<:Turing.Inference.Transition}, model::AbstractMCMC.AbstractModel, spl::DynamicPPL.Sampler{<:new_AMGS_Sampler}, state, chain_type::Type{MCMCChains.Chains}; save_state=false, stats=missing, sort_chain=false, include_varname_to_symbol=true, discard_initial=0, thinning=1, kwargs...)
 
 Bundle the samples from the AMGS sampler into an MCMCChains Chain.
 
 # Arguments
-- `ts::Vector{<:AdvancedMH.AbstractTransition}`: The Vector of transitions.
+- `ts::Vector{<:Turing.Inference.Transition}`: The Vector of transitions.
 - `model::AbstractMCMC.AbstractModel`: The model.
 - `spl::DynamicPPL.Sampler{<:new_AMGS_Sampler}`: The AMGS sampler.
 - `state`: The current state of the sampler.
@@ -478,7 +478,7 @@ Bundle the samples from the AMGS sampler into an MCMCChains Chain.
 - `kwargs...`: Additional keyword arguments.
 """
 function AbstractMCMC.bundle_samples(
-    ts::Vector{<:AdvancedMH.AbstractTransition},
+    ts::Vector{<:Turing.Inference.Transition},
     model::AbstractMCMC.AbstractModel,
     spl::DynamicPPL.Sampler{<:new_AMGS_Sampler},
     state,

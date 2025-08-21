@@ -62,7 +62,7 @@ function init_RAMState(
     transition::T_trans,
     varinfo::TVI,
     kernel::T_kernel,
-) where {T_trans <: AdvancedMH.AbstractTransition, TVI<:AbstractVarInfo, T_kernel <: Cholesky}
+) where {T_trans <: Turing.Inference.Transition, TVI<:AbstractVarInfo, T_kernel <: Cholesky}
     # Initialize step
     step = 1
     # Initialize log joint density
@@ -391,12 +391,12 @@ end
 getlogevidence(transitions, sampler::DynamicPPL.Sampler{<:RAM_Sampler}, state) = missing
 
 """
-    AbstractMCMC.bundle_samples(ts::Vector{<:AdvancedMH.AbstractTransition}, model::AbstractMCMC.AbstractModel, spl::DynamicPPL.Sampler{<:RAM_Sampler}, state, chain_type::Type{MCMCChains.Chains}; save_state=false, stats=missing, sort_chain=false, include_varname_to_symbol=true, discard_initial=0, thinning=1, kwargs...)
+    AbstractMCMC.bundle_samples(ts::Vector{<:Turing.Inference.Transition}, model::AbstractMCMC.AbstractModel, spl::DynamicPPL.Sampler{<:RAM_Sampler}, state, chain_type::Type{MCMCChains.Chains}; save_state=false, stats=missing, sort_chain=false, include_varname_to_symbol=true, discard_initial=0, thinning=1, kwargs...)
 
 Bundle the samples from the RAM sampler into an MCMCChains Chain.
 
 # Arguments
-- `ts::Vector{<:AdvancedMH.AbstractTransition}`: The Vector of transitions.
+- `ts::Vector{<:Turing.Inference.Transition}`: The Vector of transitions.
 - `model::AbstractMCMC.AbstractModel`: The model.
 - `spl::DynamicPPL.Sampler{<:RAM_Sampler}`: The RAM sampler.
 - `state`: The current state of the sampler.
@@ -410,7 +410,7 @@ Bundle the samples from the RAM sampler into an MCMCChains Chain.
 - `kwargs...`: Additional keyword arguments.
 """
 function AbstractMCMC.bundle_samples(
-    ts::Vector{<:AdvancedMH.AbstractTransition},
+    ts::Vector{<:Turing.Inference.Transition},
     model::AbstractMCMC.AbstractModel,
     spl::DynamicPPL.Sampler{<:RAM_Sampler},
     state,
