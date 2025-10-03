@@ -31,6 +31,32 @@ end
 # Write a function which checks whether to accept a new set of parameters
 mh_accept_logdens(rng::T, s_prime::T2, s::T2) where {T <:AbstractRNG, T2 <: Real} = -randexp(rng) < min(1e-6, s_prime - s)
 
+# function mh_accept_tempered(
+#     rng::AbstractRNG,
+#     prop_varinfo::DynamicPPL.VarInfoOrThreadSafeVarInfo,
+#     curr_varinfo::DynamicPPL.VarInfoOrThreadSafeVarInfo,
+#     temp::Real,
+# )   
+#     logprior_prop= DynamicPPL.getlogprior(prop_varinfo)
+#     logprior_curr= DynamicPPL.getlogprior(curr_varinfo)
+# 
+#     loglik_prop = DynamicPPL.getloglikelihood(prop_varinfo)
+#     loglik_curr = DynamicPPL.getloglikelihood(curr_varinfo)
+# 
+#     logjac_prop = DynamicPPL.getlogjac(prop_varinfo)
+#     logjac_curr = DynamicPPL.getlogjac(curr_varinfo)
+# 
+#     # tempered log posterior for proposal and current
+#     logπ_prop = logprior_prop + temp * loglik_prop + logjac_prop
+#     logπ_curr = logprior_curr + temp * loglik_curr + logjac_curr
+# 
+#     Δ = logπ_prop - logπ_curr
+# 
+#     # accept if log(u) < min(0, Δ)
+#     accep = -randexp(rng) < min(1e-6, Δ)
+#     return accep, accep ? logπ_prop : logπ_curr
+# end
+
 # Write a function which checks whether to accept a new set of parameters dr??
 function mh_dr_accept_logdens(rng::T, s_prime::T2, s::T2, s0::T2) where {T <:AbstractRNG, T2 <: Real} 
     diff_delay_ll = exp(s_prime) - exp(s)

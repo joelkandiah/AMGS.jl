@@ -19,16 +19,17 @@ using DataStructures
 export step, step_warmup, bundle_samples, isgibbscomponent, setparams_varinfo!!, drop_space, setparams!!, get_varinfo, _add_noise!
 
 # Functions which use a few different MH samplers
-export AMGS_Sampler, AMGS_Stopping_Sampler, RAM_Sampler, Bayes_AMGS_Sampler, DRAMGS_Sampler, new_AMGS_Sampler
+export AMGS_Sampler, AMGS_Tempered_Sampler, AMGS_Stopping_Tempered_Sampler, AMGS_Stopping_Sampler, RAM_Sampler, Bayes_AMGS_Sampler, DRAMGS_Sampler, new_AMGS_Sampler
 
-export AMGSState
-
+const PROGRESS = Ref(true)
 # Utility functions borrowed from Turing packages (credit their code)
 include("utils.jl")
 
 # Code for each differnt sampler
 include("amgs_sample.jl")
 include("amgs_stopping_sample.jl")
+include("amgs_tempered_sample.jl")
+include("amgs_tempered_stopping_sample.jl")
 #include("pre-release/dr_amgs_sample.jl")
 include("pre-release/new_amgs_sample.jl")
 include("ram_sample.jl")

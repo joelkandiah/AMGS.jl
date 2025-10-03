@@ -377,7 +377,7 @@ function AbstractMCMC.step(
     # new_state = init_AMGSState(new_trans, theta, Σ)
 
     # Update the kernel and return the new transition and state
-    prob = exp(min(0.0, -(lp_proposal - lp_old)))
+    prob = exp(min(0.0, (lp_proposal - lp_old)))
     _, upd_state = update_kernel(accep ? proposal_state : orig_state, new_trans, spl, prob)
     
     return new_trans, upd_state
@@ -404,7 +404,6 @@ function AbstractMCMC.step(
 )
     vis = state.varinfo
     lp_old = state.logjoint_internal
-
     # Propose the new parameters and grab the log density
     proposal_state = propose_amgs(rng, vis, model, spl, state, exp(state.β) .* state.kernel)
     lp_proposal = proposal_state.logjoint_internal
@@ -514,3 +513,48 @@ function AbstractMCMC.bundle_samples(
 
     return sort_chain ? sort(chain) : chain
 end
+
+# # Handle setting `nadapts` and `discard_initial`
+# function AbstractMCMC.sample(
+#     rng::AbstractRNG,
+#     model::DynamicPPL.Model,
+#     sampler::Sampler{<:AMGS_Sampler},
+#     N::Integer;
+#     chain_type=DynamicPPL.default_chain_type(sampler),
+#     resume_from=nothing,
+#     initial_state=DynamicPPL.loadstate(resume_from),
+#     progress=PROGRESS[],
+#     num_warmup = num_warmup,
+#     discard_initial = discard_initial,
+#     kwargs...,
+# )
+#     if resume_from === nothing
+# 
+#         # If `discard_initial` is `-1`, then users did not specify the keyword argument.
+# 
+#         return AbstractMCMC.mcmcsample(
+#             rng,
+#             model,
+#             sampler,
+#             N;
+#             chain_type=chain_type,
+#             progress=progress,
+#             num_warmup = num_warmup,
+#             discard_initial = discard_initial,
+#             kwargs...,
+#         )
+#     else
+#         return AbstractMCMC.mcmcsample(
+#             rng,
+#             model,
+#             sampler,
+#             N;
+#             chain_type=chain_type,
+#             initial_state=initial_state,
+#             progress=progress,
+#             num_warmup = 0,
+#             discard_initial=0,
+#             kwargs...,
+#         )
+#     end
+# end
