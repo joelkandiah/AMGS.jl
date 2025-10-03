@@ -134,30 +134,35 @@ function update_kernel(state::AMGSStoppingTemperedState, trans::T, spl::Sampler{
     n    = length(Δ)
 
     # Robbins–Monro gain
-    η = step^(-spl.alg.convergence_step)
+    @fastmath begin
+        η = (step + 1.0)^(-spl.alg.convergence_step)
 
-    # Adapt acceptance-rate scaling
-    β = state.β + η * (prob - spl.alg.acceptance_rate)
+        # Adapt acceptance-rate scaling
+        β = state.β + η * (prob - spl.alg.acceptance_rate)
 
-    # Update running mean μ ← (1−η)μ + ηθ
-    @. μ += η * (Δ - μ)
+        # Update running mean μ ← (1−η)μ + ηθ
+        @. μ += η * (Δ - μ)
 
-    # Δ = θ - μ (store in preallocated buffer Δ in the state)
-    @. Δ -= μ
+        # Δ = θ - μ (store in preallocated buffer Δ in the state)
+        @. Δ -= μ
 
-    # Outer product update, symmetric and in-place:
-    new_Σ = Matrix(state.kernel_running_calc)
-    @inbounds for i in 1:n
-        for j in i:n
-            new_Σ[i,j] += η * (Δ[i] * Δ[j] - new_Σ[i,j])
-            new_Σ[j,i] = new_Σ[i,j]  # preserve symmetry
+        # Outer product update, symmetric and in-place:
+        @inbounds for i in 1:n
+            Δi = Δ[i]
+            for j in i:n
+                #ΔΔ = Δ[i] * Δ[j]
+                #Σ_ij = state.kernel[i,j]
+                state.kernel[i,j] += η * (Δi * Δ[j] - state.kernel[i,j])
+                state.kernel[j,i] = state.kernel[i,j]  # preserve symmetry
+            end
         end
-    end
 
-    # Optional noise stabilisation (fast Val dispatch)
-    _add_noise!(new_Σ, spl.alg.noise_scaling, n, spl.alg.use_noise_stabiliser)
+        # Optional noise stabilisation (fast Val dispatch)
+        @inline _add_noise!(state.kernel, spl.alg.noise_scaling, n, spl.alg.use_noise_stabiliser)
+    end 
+
     ## Reset the running covariance and mean calculation
-    return new_Σ, AMGSStoppingTemperedState(trans, state.varinfo, μ, new_Σ, step, β, state.logjoint_internal, state.logjoint_tempered, 0.0, zero(μ), zero(new_Σ), state.stopped)
+    return state.kernel, AMGSStoppingTemperedState(trans, state.varinfo, μ, state.kernel, step, β, state.logjoint_internal, state.logjoint_tempered, 0.0, zero(μ), zero(state.kernel), state.stopped)
 end
 
 # Function to set the new parameters (for use with gibbs sampler)
@@ -176,9 +181,9 @@ function Turing.Inference.setparams_varinfo!!(
 )
 
     # Update the vi
-    vi = state.varinfo
-    vi = DynamicPPL.unflatten(vi, params[:])
-    vi  = last(DynamicPPL.evaluate!!(model, vi)) 
+    # vi = state.varinfo
+    # vi = DynamicPPL.unflatten(vi, params[:])
+    vi  = last(DynamicPPL.evaluate!!(model, params)) 
 
     lp = DynamicPPL.getlogjoint_internal(vi)
     tempered_lp = DynamicPPL.getlogprior(vi) + sampler.alg.temperature * DynamicPPL.getloglikelihood(vi) - DynamicPPL.getlogjac(vi)

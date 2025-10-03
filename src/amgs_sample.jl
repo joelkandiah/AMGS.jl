@@ -47,11 +47,12 @@ struct AMGSState{
     step::TStep
     β::Tβ
     logjoint_internal::TL
+    Δ_cache::Tμ
 end
 
 # Define the initial state of the sampler
 """
-    init_AMGSState(transition::T_trans, μ::Vector{T_μ}, kernel::T_kernel) where {T_trans <: Turing.Inference.Transition, T_μ <: Real, T_kernel <: Matrix}
+    init_AMGSState(transition::T_trans, μ::Vector{T_μ}, kernel::T_kernel) where {T_trans <: Turing.Inference.Transition, T_μ <: Real, T_kernel <: AbstractMatrix}
 
 Initialize the state of the AMGS sampler with the given transition, mean vector μ, and kernel matrix.
 
@@ -70,7 +71,7 @@ function init_AMGSState(
     step = 1
     β = zero(eltype(μ))
     lp = DynamicPPL.getlogjoint_internal(varinfo) # Get the log joint density
-    AMGSState{T_trans, TVI, typeof(μ), T_kernel, Int, typeof(β), typeof(lp)}(transition, varinfo, μ, kernel, step, β, lp)
+    AMGSState{T_trans, TVI, typeof(μ), T_kernel, Int, typeof(β), typeof(lp)}(transition, varinfo, μ, kernel, step, β, lp, similar(μ))
 end
 
 """
@@ -94,7 +95,7 @@ function init_AMGSState(
     β = zero(typeof(μ))
     new_μ = [μ]
     lp = DynamicPPL.getlogjoint_internal(varinfo) # Get the log joint density
-    AMGSState{T_trans, TVI, typeof(new_μ), T_kernel, Int, typeof(β), typeof(lp)}(transition, varinfo, new_μ, kernel, step, β, lp)
+    AMGSState{T_trans, TVI, typeof(new_μ), T_kernel, Int, typeof(β), typeof(lp)}(transition, varinfo, new_μ, kernel, step, β, lp, similar(μ))
 end
 
 # Construct a transition object using our parameters of interest (varinfo instead of params)
@@ -117,7 +118,7 @@ add noise to the kernel matrix Δ² based on the noise scaling and whether noise
 - `use_noise_stabiliser`: A boolean indicating whether to use noise stabilisation.
 """
 function _add_noise!(Δ², noise_scaling, θ_size, ::Val{true})
-    Δ² .= Δ² .+ Diagonal(noise_scaling .* rand(θ_size))
+    Δ² .= Δ² .+ diagm(noise_scaling .* rand(θ_size))
 end
 
 function _add_noise!(Δ², noise_scaling, θ_size, ::Val{false})
@@ -139,35 +140,37 @@ Update the kernel matrix, and internal quantities of the AMGS sampler state base
 function update_kernel(state::AMGSState, trans::T, spl::Sampler{<:AMGS_Sampler}, prob::T3) where {T <: Turing.Inference.Transition, T3 <: Real}
     μ    = state.μ
     step = state.step
-    Δ    = state.varinfo[:]
-    n    = length(Δ)
+    state.Δ_cache .= state.varinfo[:]
+    n    = length(state.Δ_cache)
 
     # Robbins–Monro gain
-    η = (step + 1.0)^(-spl.alg.convergence_step)
+    @fastmath begin
+        η = (step + 1.0)^(-spl.alg.convergence_step)
 
-    # Adapt acceptance-rate scaling
-    β = state.β + η * (prob - spl.alg.acceptance_rate)
+        # Adapt acceptance-rate scaling
+        β = state.β + η * (prob - spl.alg.acceptance_rate)
 
-    # Update running mean μ ← (1−η)μ + ηθ
-    @. μ += η * (Δ - μ)
+        # Update running mean μ ← (1−η)μ + ηθ
+        @. μ += η * (state.Δ_cache - μ)
 
-    # Δ = θ - μ (store in preallocated buffer Δ in the state)
-    @. Δ -= μ
+        # Δ = θ - μ (store in preallocated buffer Δ in the state)
+        @. state.Δ_cache -= μ
 
-    # Outer product update, symmetric and in-place:
-    new_Σ = Matrix(state.kernel)
-    @inbounds for i in 1:n
-        for j in i:n
-            #ΔΔ = Δ[i] * Δ[j]
-            #Σ_ij = new_Σ[i,j]
-            new_Σ[i,j] += η * (Δ[i] * Δ[j] - new_Σ[i,j])
-            new_Σ[j,i] = new_Σ[i,j]  # preserve symmetry
+        # Outer product update, symmetric and in-place:
+        @inbounds for i in 1:n
+            Δi = state.Δ_cache[i]
+            for j in i:n
+                #ΔΔ = Δ[i] * Δ[j]
+                #Σ_ij = state.kernel[i,j]
+                state.kernel[i,j] += η * (Δi * state.Δ_cache[j] - state.kernel[i,j])
+                state.kernel[j,i] = state.kernel[i,j]  # preserve symmetry
+            end
         end
-    end
 
-    # Optional noise stabilisation (fast Val dispatch)
-    _add_noise!(new_Σ, spl.alg.noise_scaling, n, spl.alg.use_noise_stabiliser)
-    return new_Σ, AMGSState(trans, state.varinfo, μ, new_Σ, step + 1, β, state.logjoint_internal)
+        # Optional noise stabilisation (fast Val dispatch)
+        @inline _add_noise!(state.kernel, spl.alg.noise_scaling, n, spl.alg.use_noise_stabiliser)
+    end 
+    return state.kernel, AMGSState(trans, state.varinfo, μ, state.kernel, step + 1, β, state.logjoint_internal, state.Δ_cache)
 end
 
 # Function to set the new parameters (for use with gibbs sampler)
@@ -186,14 +189,14 @@ function Turing.Inference.setparams_varinfo!!(
 )
 
     # Update the vi
-    vi = state.varinfo
-    vi = DynamicPPL.unflatten(vi, params[:])
-    vi  = last(DynamicPPL.evaluate!!(model, vi)) 
+    # vi = state.varinfo
+    # vi = DynamicPPL.unflatten(vi, params[:])
+    vi  = last(DynamicPPL.evaluate!!(model, params)) 
 
     lp = DynamicPPL.getlogjoint_internal(vi)
     # #update the model state
     new_transition = Turing.Inference.Transition(model, vi, nothing)
-    new_state = AMGSState(new_transition, vi, state.μ, state.kernel, state.step, state.β, lp) 
+    new_state = AMGSState(new_transition, vi, state.μ, state.kernel, state.step, state.β, lp, state.Δ_cache) 
     
     # Update the VarInfo with the new log density
     return new_state
@@ -222,9 +225,9 @@ function propose_amgs(
     Σ::AbstractMatrix
 )
     # Grab the parameters we are performing inference on
-    θ = vi[:]
+    state.Δ_cache .= vi[:]
     # Propose a new set of parameters
-    proposal = proposewalk(rng, θ, Σ)
+    proposal = proposewalk(rng, state.Δ_cache, Σ)
     
     proposal_vi = DynamicPPL.unflatten(vi, proposal)
 
@@ -271,7 +274,7 @@ function AbstractMCMC.step_warmup(
 
     # Get the parameters of interest and create the covariance matrix
     theta = vis[:]
-    Σ = Diagonal(0.01 .* abs.(theta) .+ 1e-6)
+    Σ = diagm(0.01 .* abs.(theta) .+ 1e-6)
 
     # get the old state:
     orig_state = init_AMGSState(prev_transition, vis, theta, Σ)
@@ -360,7 +363,7 @@ function AbstractMCMC.step(
 
     # Get the parameters of interest and create the covariance matrix
     theta = vis[:]
-    Σ = Diagonal(0.01 .* abs.(theta) .+ 1e-6)
+    Σ = diagm(0.01 .* abs.(theta) .+ 1e-6)
 
     orig_state = init_AMGSState(prev_transition, vis, theta, Σ) 
     # Propose a new set of parameters and grab the log density

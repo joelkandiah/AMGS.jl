@@ -10,6 +10,8 @@ using Accessors
 using MCMCChains
 using OrderedCollections
 using DataStructures
+using LoopVectorization
+
 
 #TODO: Resolve the in place operations in the code (BangBang.jl)
 #TODO: Resolve the type instability in the code
