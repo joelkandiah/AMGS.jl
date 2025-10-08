@@ -196,7 +196,7 @@ end
 Turing.Inference.isgibbscomponent(::Bayes_AMGS_Sampler) = true 
 
 # Get varinfo
-function get_varinfo(state::T) where {T<:BayesAMGSState}
+function Turing.Inference.get_varinfo(state::T) where {T<:BayesAMGSState}
     # display(state.transition.params)
     # display(typeof(state.transition.params))
     return state.varinfo

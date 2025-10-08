@@ -168,7 +168,7 @@ end
 Turing.Inference.isgibbscomponent(::new_AMGS_Sampler) = true 
 
 # Get varinfo
-function get_varinfo(state::T) where {T<:newAMGSState}
+function Turing.Inference.get_varinfo(state::T) where {T<:newAMGSState}
     return state.varinfo
 end
 
@@ -180,9 +180,9 @@ function Turing.Inference.setparams_varinfo!!(
 )
 
     # Update the vi
-    vi = state.varinfo
-    vi = DynamicPPL.unflatten(vi, params[:])
-    vi  = last(DynamicPPL.evaluate!!(model, vi)) 
+    # vi = state.varinfo
+    # vi = DynamicPPL.unflatten(vi, params[:])
+    vi  = last(DynamicPPL.evaluate!!(model, params)) 
 
     lp = DynamicPPL.getlogjoint_internal(vi)
     # #update the model state

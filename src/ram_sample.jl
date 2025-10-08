@@ -118,7 +118,7 @@ end
 Turing.Inference.isgibbscomponent(::RAM_Sampler) = true 
 
 # Get varinfo
-function get_varinfo(state::T) where {T<:RAMState}
+function Turing.Inference.get_varinfo(state::T) where {T<:RAMState}
     return state.varinfo
 end
 
@@ -130,9 +130,9 @@ function Turing.Inference.setparams_varinfo!!(
     params::AbstractVarInfo,
 )
     # Update the vi
-    vi = state.varinfo
-    vi = DynamicPPL.unflatten(vi, params[:])
-    vi  = last(DynamicPPL.evaluate!!(model, vi)) 
+    #vi = state.varinfo
+    #vi = DynamicPPL.unflatten(vi, params[:])
+    vi  = last(DynamicPPL.evaluate!!(model, params)) 
 
     lp = DynamicPPL.getlogjoint_internal(vi)
     # #update the model state

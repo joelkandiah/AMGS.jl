@@ -184,7 +184,7 @@ end
 Turing.Inference.isgibbscomponent(::AMGS_Stopping_Sampler) = true 
 
 # Get varinfo
-function get_varinfo(state::T) where {T<:AMGSStoppingState}
+function Turing.Inference.get_varinfo(state::T) where {T<:AMGSStoppingState}
     return state.varinfo
 end
 
