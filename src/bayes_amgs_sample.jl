@@ -38,6 +38,28 @@ DynamicPPL.default_chain_type(sampler::Sampler{<:Bayes_AMGS_Sampler}) = MCMCChai
 
 # Define the state of the sampler
 # Contains Important quantities for computation of the updated kernel
+"""
+    BayesAMGSState
+
+State container used by the Bayes AMGS sampler to store running statistics
+for Bayesian adaptive MCMC with complex adaptation schemes.
+
+# Fields
+- `transition`: the latest `Turing.Inference.Transition` object.
+- `varinfo`: the `VarInfo` corresponding to the current parameter values.
+- `μ`: running mean vector of parameters.
+- `kernel`: running covariance (or scale) matrix used for proposals.
+- `step`: integer step counter for adaptation scheduling.
+- `λ`: current adaptation scaling parameter.
+- `λ_start`: initial adaptation scaling parameter.
+- `n_start`: starting step for adaptation.
+- `A`: adaptation matrix or statistic.
+- `δ`: adaptation decay parameter.
+- `d`: dimension or degree parameter.
+- `c`: adaptation constant.
+- `vec_X`: linked list storing historical parameter values.
+- `logjoint_internal`: cached log joint density for the current state.
+"""
 struct BayesAMGSState{
     TTrans<:Turing.Inference.Transition,
     TVI<:AbstractVarInfo,
@@ -73,6 +95,18 @@ struct BayesAMGSState{
 end
 
 # Function to index a linked list (equivalent to iterating through)
+"""
+    get_index_ll(idx::Int, vec_X::LinkedList{T}) where {T}
+
+Get the element at index `idx` from a LinkedList `vec_X`.
+
+# Arguments
+- `idx::Int`: The 1-based index to retrieve (must be ≥ 1).
+- `vec_X::LinkedList{T}`: The linked list to index.
+
+# Returns
+- The element at the specified index.
+"""
 function get_index_ll(idx::Int, vec_X::LinkedList{T}) where {T}
     if idx < 1
         # @error "Index must be greater than 0"
@@ -316,11 +350,6 @@ function AbstractMCMC.step_warmup(
 
     # Check whether to accept the new parameters
     accep = mh_accept_logdens(rng, lp_proposal, lp_old)
-    #if !accep
-    #   return prev_transition, init_BayesAMGSState(prev_transition, theta, S, n_start, A, δ, d, c)
-    #end
-    #trans = Turing.Inference.Transition(vis, lp_proposal, true)
-    #state = init_BayesAMGSState(trans, theta, S, n_start, A, δ, d, c)
 
     return accep ? proposal_state.transition : prev_transition, accep ? proposal_state : orig_state
 end

@@ -3,6 +3,36 @@
 
 # Start by defining the sampler
 
+"""
+    AMGS_Stopping_Tempered_Sampler(acceptance_rate, convergence_step; use_noise_stabiliser=false, noise_scaling=1e-6, temperature=1, lower_stopping_accep=1.01, upper_stopping_accep=1.02, adaptation_interval=200, max_adaptation=-1)
+
+Tempered version of the Adaptive Metropolis-within-Gibbs sampler with automatic stopping criteria.
+
+This sampler combines tempered MCMC with adaptive stopping based on acceptance rate
+convergence. Adaptation stops when the running acceptance rate stays within the bounds
+[`lower_stopping_accep`, `upper_stopping_accep`] for `adaptation_interval` consecutive steps,
+or after `max_adaptation` steps if specified.
+
+# Fields
+- `acceptance_rate::Real`: target acceptance rate for the Robbins–Monro update.
+- `convergence_step::Real`: controls the step-size decay in adaptation (power).
+- `use_noise_stabiliser::Val{Bool}`: fast-dispatch flag to optionally add noise.
+- `noise_scaling::Real`: variance scale used by the optional noise stabiliser.
+- `temperature::Real`: temperature parameter for likelihood scaling.
+- `lower_stopping_accep::Real`: lower bound for stopping acceptance rate check.
+- `upper_stopping_accep::Real`: upper bound for stopping acceptance rate check.
+- `adaptation_interval::Int`: number of steps to check for acceptance rate stability.
+- `max_adaptation::Int`: maximum adaptation steps (-1 for unlimited).
+
+# Examples
+```julia
+sampler = AMGS_Stopping_Tempered_Sampler(0.234, 1000, temperature=0.8)
+chain = sample(model, sampler, 10000)  # May stop early when converged
+```
+
+TODO: Add detailed explanation of stopping criteria and convergence detection.
+TODO: Explain the interaction between temperature and stopping conditions.
+"""
 struct AMGS_Stopping_Tempered_Sampler{ T_accep <: Real, T_conv_step <: Real, T_scale <: Real, T_B, T_Temp <: Real} <: Turing.InferenceAlgorithm
     acceptance_rate::T_accep
     convergence_step::T_conv_step
@@ -36,6 +66,24 @@ DynamicPPL.default_chain_type(sampler::Sampler{<:AMGS_Stopping_Tempered_Sampler}
 
 # Define the state of the sampler
 # Contains Important quantities for computation of the updated kernel
+"""
+    AMGSStoppingTemperedState
+
+State container used by the AMGS Stopping Tempered sampler to store running statistics
+required for adaptation and automatic stopping in tempered MCMC.
+
+# Fields
+- `transition`: the latest `Turing.Inference.Transition` object.
+- `varinfo`: the `VarInfo` corresponding to the current parameter values.
+- `μ`: running mean vector of parameters.
+- `kernel`: running covariance (or scale) matrix used for proposals.
+- `step`: integer step counter for adaptation scheduling.
+- `β`: scalar adapt scaling for acceptance rate control.
+- `logjoint_internal`: cached log joint density for the current state.
+- `logjoint_tempered`: cached tempered log joint density (includes temperature scaling).
+- `mean_accep`: running average of acceptance rates for stopping criteria.
+- `μ_running_avg`: running average of parameter means for convergence monitoring.
+"""
 struct AMGSStoppingTemperedState{
     TTrans<:Turing.Inference.Transition,
     TVI<:AbstractVarInfo,
@@ -196,6 +244,19 @@ function Turing.Inference.setparams_varinfo!!(
 end
 
 # Function to check whether to stop adapting
+"""
+    check_end_adaptation(state, accepted, spl)
+
+Check whether adaptation should stop based on the current state and acceptance criteria.
+
+# Arguments
+- `state::AMGSStoppingTemperedState`: The current sampler state.
+- `accepted::Bool`: Whether the current proposal was accepted.
+- `spl::Sampler{<:AMGS_Stopping_Tempered_Sampler}`: The AMGS Stopping Tempered sampler.
+
+# Returns
+`true` if adaptation should stop, `false` otherwise.
+"""
 function check_end_adaptation(state::AMGSStoppingTemperedState, accepted::Bool, spl::Sampler{<:AMGS_Stopping_Tempered_Sampler})
     # Only check if this step we are at the end of an adaptation interval
     if ((state.step + 1) % spl.alg.adaptation_interval) !== 0
@@ -217,6 +278,20 @@ end
 
 # update the runing mean and covariance
 # Use Welford's online algortihm for numerical stability
+"""
+    running_update_state(state, step_mod, accepted, spl)
+
+Update the running statistics for the tempered stopping sampler using Welford's online algorithm.
+
+# Arguments
+- `state::AMGSStoppingTemperedState`: The current sampler state.
+- `step_mod::Int`: The step modulo for tracking adaptation intervals.
+- `accepted::Bool`: Whether the current proposal was accepted.
+- `spl`: The sampler.
+
+# Returns
+The updated state with new running statistics.
+"""
 function running_update_state(state::AMGSStoppingTemperedState, step_mod::Int, accepted::Bool, spl)
     if state.stopped
         return state
@@ -519,6 +594,19 @@ function DynamicPPL.assume(
 end
 
 # Define function to get log evidence
+"""
+    getlogevidence(transitions, sampler, state)
+
+Get the log evidence from a collection of transitions. For AMGS samplers, this returns `missing` as log evidence computation is not implemented.
+
+# Arguments
+- `transitions`: Vector of transitions from the sampling process.
+- `sampler::DynamicPPL.Sampler{<:AMGS_Stopping_Tempered_Sampler}`: The AMGS Stopping Tempered sampler.
+- `state`: The final sampler state.
+
+# Returns
+`missing` (log evidence computation not implemented for AMGS samplers).
+"""
 getlogevidence(transitions, sampler::DynamicPPL.Sampler{<:AMGS_Stopping_Tempered_Sampler}, state) = missing
 
 """

@@ -3,6 +3,32 @@
 
 # Start by defining the sampler
 
+"""
+    AMGS_Tempered_Sampler(acceptance_rate, convergence_step; use_noise_stabiliser=false, noise_scaling=1e-6, temperature=1)
+
+Tempered version of the Adaptive Metropolis-within-Gibbs sampler.
+
+This sampler implements tempered MCMC where the likelihood is scaled by a temperature
+parameter `temperature`. When `temperature < 1`, this flattens the posterior, potentially
+improving mixing in multimodal distributions. When `temperature > 1`, it sharpens the
+posterior, which can be useful for optimization-like tasks.
+
+# Fields
+- `acceptance_rate::Real`: target acceptance rate for the Robbins–Monro update.
+- `convergence_step::Real`: controls the step-size decay in adaptation (power).
+- `use_noise_stabiliser::Val{Bool}`: fast-dispatch flag to optionally add noise.
+- `noise_scaling::Real`: variance scale used by the optional noise stabiliser.
+- `temperature::Real`: temperature parameter for likelihood scaling (default 1.0).
+
+# Examples
+```julia
+sampler = AMGS_Tempered_Sampler(0.234, 1000, temperature=0.8)
+chain = sample(model, sampler, 1000)
+```
+
+TODO: Add detailed explanation of tempered MCMC and when to use temperature ≠ 1.
+TODO: Explain how temperature affects the acceptance probability computation.
+"""
 struct AMGS_Tempered_Sampler{ T_accep <: Real, T_conv_step <: Real, T_scale <: Real, T_B, T_Temp <: Real} <: Turing.InferenceAlgorithm
     acceptance_rate::T_accep
     convergence_step::T_conv_step
@@ -32,6 +58,22 @@ DynamicPPL.default_chain_type(sampler::Sampler{<:AMGS_Tempered_Sampler}) = MCMCC
 
 # Define the state of the sampler
 # Contains Important quantities for computation of the updated kernel
+"""
+    AMGSTemperedState
+
+State container used by the AMGS Tempered sampler to store running statistics
+required for adaptation in tempered MCMC.
+
+# Fields
+- `transition`: the latest `Turing.Inference.Transition` object.
+- `varinfo`: the `VarInfo` corresponding to the current parameter values.
+- `μ`: running mean vector of parameters.
+- `kernel`: running covariance (or scale) matrix used for proposals.
+- `step`: integer step counter for adaptation scheduling.
+- `β`: scalar adapt scaling for acceptance rate control.
+- `logjoint_internal`: cached log joint density for the current state.
+- `logjoint_tempered`: cached tempered log joint density (includes temperature scaling).
+"""
 struct AMGSTemperedState{
     TTrans<:Turing.Inference.Transition,
     TVI<:AbstractVarInfo,

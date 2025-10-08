@@ -3,6 +3,32 @@
 
 # Start by defining the sampler
 
+"""
+    DRAMGS_Sampler(acceptance_rate, convergence_step; use_noise_stabiliser=false, noise_scaling=1e-6, max_delayed_rejection_steps=3, rejection_step_sizes=nothing)
+
+Delayed Rejection variant of the Adaptive Metropolis-within-Gibbs sampler.
+
+This sampler implements delayed rejection MCMC, which uses a sequence of fallback
+proposals when an initial proposal is rejected. This can improve acceptance rates
+and mixing, especially in high-dimensional or difficult geometries.
+
+# Fields
+- `acceptance_rate::Real`: target acceptance rate for the Robbins–Monro update.
+- `convergence_step::Real`: controls the step-size decay in adaptation (power).
+- `use_noise_stabiliser::Bool`: whether to add noise to prevent covariance degeneracy.
+- `noise_scaling::Real`: variance scale used by the optional noise stabiliser.
+- `max_delayed_rejection_steps::Int`: maximum number of delayed rejection attempts.
+- `rejection_step_sizes::AbstractVector{<:Real}`: step size scaling for each rejection level.
+
+# Examples
+```julia
+sampler = DRAMGS_Sampler(0.234, 1000, max_delayed_rejection_steps=2)
+chain = sample(model, sampler, 1000)
+```
+
+TODO: Add detailed explanation of delayed rejection algorithm and acceptance computation.
+TODO: Explain how rejection_step_sizes affect the fallback proposals.
+"""
 struct DRAMGS_Sampler{T_accep <: Real, T_conv_step <: Real, T_scale <: Real, T_max_steps <: Int, T_rej_steps <: AbstractVector{<:Real}} <: Turing.InferenceAlgorithm
     acceptance_rate::T_accep
     convergence_step::T_conv_step

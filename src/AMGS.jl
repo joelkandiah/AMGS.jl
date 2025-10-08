@@ -1,3 +1,40 @@
+"""
+AMGS
+
+Adaptive Metropolis-within-Gibbs Samplers (AMGS)
+
+This module provides a collection of adaptive Metropolis-Hastings samplers
+implemented to work with Turing / DynamicPPL and AbstractMCMC. The samplers
+implement online covariance adaptation (similar to Haario et al. and
+Robbins–Monro style updates) and a set of utility functions for proposing
+and updating parameter VarInfo objects.
+
+Features
+- AMGS sampler: adaptive Metropolis-within-Gibbs with running mean and
+	covariance adaptation
+- Variants: delayed-rejection, tempered, data-augmentation and stopping
+	wrappers (see the individual sampler files in `src/`)
+
+Usage
+```
+using AMGS
+# Use the samplers via Turing/AbstractMCMC APIs, e.g.:
+# sampler = AMGS_Sampler(0.234, 1000)
+# chain = sample(model, sampler, 1000)
+```
+
+Notes and TODOs
+- Many docstrings in the individual sampler files include TODO placeholders
+	where more mathematical detail and algorithm references should be added.
+	Please expand the algorithm description below and in the function-level
+	docstrings where indicated.
+
+Algorithm / background (fill in)
+- [x] Add a brief description of the adaptive algorithm, reference papers,
+	and the meaning of the parameters `acceptance_rate`, `convergence_step`,
+	`noise_scaling` and `use_noise_stabiliser`.
+"""
+
 module AMGS
 
 using Turing

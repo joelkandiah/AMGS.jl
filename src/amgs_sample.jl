@@ -1,8 +1,36 @@
-#  write a functions step and step_warmup which are used in the AMGS_sampler.
-# Based on Algorithm 4 in https://link.springer.com/article/10.1007/s11222-008-9110-y
+"""
+amgs_sample.jl
+
+Sample implementations for the Adaptive Metropolis-within-Gibbs (AMGS)
+sampler and variants.
+
+This file defines the `AMGS_Sampler` type and the core `step` /
+`step_warmup` implementations used by AbstractMCMC/DynamicPPL. Many
+functions include TODO placeholders where a more detailed algorithmic
+description or mathematical derivation should be inserted.
+
+References
+- https://link.springer.com/article/10.1007/s11222-008-9110-y 
+- [Add more references and explanation here]
+
+"""
 
 # Start by defining the sampler
 
+"""
+    AMGS_Sampler(acceptance_rate, convergence_step; use_noise_stabiliser=false, noise_scaling=1e-6)
+
+Sampler type for the adaptive Metropolis-within-Gibbs algorithm.
+
+# Fields
+- `acceptance_rate::Real`: target acceptance rate for the Robbins–Monro update.
+- `convergence_step::Real`: controls the step-size decay in adaptation (power).
+- `use_noise_stabiliser::Val{Bool}`: fast-dispatch flag to optionally add noise.
+- `noise_scaling::Real`: variance scale used by the optional noise stabiliser.
+
+TODO: Add an example of constructing the sampler and a brief note on how to
+select sensible defaults for `acceptance_rate` and `convergence_step`.
+"""
 struct AMGS_Sampler{ T_accep <: Real, T_conv_step <: Real, T_scale <: Real, T_B} <: Turing.InferenceAlgorithm
     acceptance_rate::T_accep
     convergence_step::T_conv_step
@@ -29,8 +57,22 @@ end
 
 DynamicPPL.default_chain_type(sampler::Sampler{<:AMGS_Sampler}) = MCMCChains.Chains
 
-# Define the state of the sampler
-# Contains Important quantities for computation of the updated kernel
+"""
+    AMGSState
+
+State container used by the AMGS sampler to store running statistics
+required for adaptation.
+
+# Fields
+- `transition`: the latest `Turing.Inference.Transition` object.
+- `varinfo`: the `VarInfo` corresponding to the current parameter values.
+- `μ`: running mean vector of parameters.
+- `kernel`: running covariance (or scale) matrix used for proposals.
+- `step`: integer step counter for adaptation scheduling.
+- `β`: scalar adapt scaling for acceptance rate control.
+- `logjoint_internal`: cached log joint density for the current state.
+- `Δ_cache`: preallocated buffer used for delta computations.
+"""
 struct AMGSState{
     TTrans<:Turing.Inference.Transition,
     TVI<:AbstractVarInfo,
@@ -52,14 +94,18 @@ end
 
 # Define the initial state of the sampler
 """
-    init_AMGSState(transition::T_trans, μ::Vector{T_μ}, kernel::T_kernel) where {T_trans <: Turing.Inference.Transition, T_μ <: Real, T_kernel <: AbstractMatrix}
+    init_AMGSState(transition, varinfo, μ, kernel)
 
-Initialize the state of the AMGS sampler with the given transition, mean vector μ, and kernel matrix.
+Create a new `AMGSState` initializing running mean and kernel.
 
-# Arguments
-- `transition::T_trans`: The initial transition object.
-- `μ::Vector{T_μ}`: The initial mean vector.
-- `kernel::T_kernel`: The initial kernel matrix.
+The `μ` vector should have the same length as the number of parameters in the model,
+typically initialized to zeros or the starting parameter values. The `kernel` matrix
+should be a positive definite covariance matrix, often initialized as a diagonal
+matrix with variances reflecting expected parameter scales (e.g., `diagm([1.0, 1.0])`
+for a 2-parameter model).
+
+For hierarchical models, `μ` and `kernel` should account for all flattened parameters
+after `DynamicPPL.varname_and_value_leaves` processing.
 """
 function init_AMGSState(
     transition::T_trans,
@@ -75,14 +121,9 @@ function init_AMGSState(
 end
 
 """
-    init_AMGSState(transition::T_trans, μ::T_μ, kernel::T_kernel) where {T_trans <: Turing.Inference.Transition, T_μ <: Real, T_kernel <: AbstractMatrix}
+    init_AMGSState(transition, varinfo, μ, kernel)  # 1D convenience constructor
 
-Initialize the state of the AMGS sampler with the given transition, mean value μ, and kernel matrix for a 1D case.
-
-# Arguments
-- `transition::T_trans`: The initial transition object.
-- `μ::T_μ`: The initial mean value.
-- `kernel::T_kernel`: The initial kernel matrix.
+Convenience constructor when `μ` is scalar (1D parameter vector).
 """
 function init_AMGSState(
     transition::T_trans,
@@ -98,44 +139,51 @@ function init_AMGSState(
     AMGSState{T_trans, TVI, typeof(new_μ), T_kernel, Int, typeof(β), typeof(lp)}(transition, varinfo, new_μ, kernel, step, β, lp, similar(μ))
 end
 
-# Construct a transition object using our parameters of interest (varinfo instead of params)
-# Turing.Inference.Transition(
-#     params::T_params,
-#     lp::T_lp,
-#     accepted::Bool,
-# ) where {T_params <: AbstractVarInfo, T_lp <: Real} = Turing.Inference.Transition{T_params, T_lp}(params, lp, accepted)
-
 # Write a function which updates the kernel
 """
-_add_noise!(Δ², noise_scaling, θ_size, use_noise_stabiliser)
+    _add_noise!(Δ², noise_scaling, θ_size, use_noise_stabiliser)
 
-add noise to the kernel matrix Δ² based on the noise scaling and whether noise stabiliser is used.
+Add diagonal noise to `Δ²` when `use_noise_stabiliser` is true. This can help
+prevent degeneracy of the running covariance matrix during adaptation.
 
-# Arguments
-- `Δ²`: The kernel matrix to which noise will be added.
-- `noise_scaling`: The scaling factor for the noise.
-- `θ_size`: The size of the parameter vector θ.
-- `use_noise_stabiliser`: A boolean indicating whether to use noise stabilisation.
+In high-dimensional or poorly conditioned problems, the empirical covariance
+matrix may become singular or nearly singular. Adding small diagonal noise
+helps maintain numerical stability and prevents the Cholesky decomposition
+from failing. The noise is drawn from a distribution scaled by `noise_scaling`.
+
+Recommended `noise_scaling` values are typically small (1e-6 to 1e-4) and should
+be much smaller than the typical parameter variances to avoid biasing the
+adaptation too strongly.
 """
 function _add_noise!(Δ², noise_scaling, θ_size, ::Val{true})
     Δ² .= Δ² .+ diagm(noise_scaling .* rand(θ_size))
 end
 
 function _add_noise!(Δ², noise_scaling, θ_size, ::Val{false})
-    # Do nothing
+    # No-op when stabiliser disabled
 end
 
 
 """
-    update_kernel(state::AMGSState, trans::T, spl::Sampler{<:AMGS_Sampler}, prob::T3) where {T <: Turing.Inference.Transition, T3 <: Real}
+    update_kernel(state, trans, spl, prob)
 
-Update the kernel matrix, and internal quantities of the AMGS sampler state based on the new transition and acceptance probability.
+Perform a Robbins–Monro style update of the running mean and covariance
+(`state.μ` and `state.kernel`) given an acceptance probability `prob`.
 
-# Arguments
-- `state::AMGSState`: The current state of the sampler.
-- `trans::T`: The new transition object.
-- `spl::Sampler{<:AMGS_Sampler}`: The AMGS sampler.
-- `prob::T3`: The acceptance probability.
+This function implements the core adaptation mechanism of AMGS, updating the
+proposal distribution online based on the current parameter values and acceptance
+probability. The adaptation uses a diminishing step size η = (step+1)^(-γ) where
+γ is the `convergence_step` parameter.
+
+The updates follow:
+- Mean: μ ← (1-η)μ + ηθ (moving average of parameters)
+- Covariance: Σ ← (1-η)Σ + η(θ-μ)(θ-μ)ᵀ (moving average of outer products)
+- Acceptance scaling: β ← β + η(prob - target_rate)
+
+Returns the updated kernel and a new `AMGSState`.
+
+TODO: Add mathematical derivation of Robbins-Monro convergence properties.
+TODO: Explain the relationship between convergence_step and adaptation speed.
 """
 function update_kernel(state::AMGSState, trans::T, spl::Sampler{<:AMGS_Sampler}, prob::T3) where {T <: Turing.Inference.Transition, T3 <: Real}
     μ    = state.μ
@@ -516,48 +564,3 @@ function AbstractMCMC.bundle_samples(
 
     return sort_chain ? sort(chain) : chain
 end
-
-# # Handle setting `nadapts` and `discard_initial`
-# function AbstractMCMC.sample(
-#     rng::AbstractRNG,
-#     model::DynamicPPL.Model,
-#     sampler::Sampler{<:AMGS_Sampler},
-#     N::Integer;
-#     chain_type=DynamicPPL.default_chain_type(sampler),
-#     resume_from=nothing,
-#     initial_state=DynamicPPL.loadstate(resume_from),
-#     progress=PROGRESS[],
-#     num_warmup = num_warmup,
-#     discard_initial = discard_initial,
-#     kwargs...,
-# )
-#     if resume_from === nothing
-# 
-#         # If `discard_initial` is `-1`, then users did not specify the keyword argument.
-# 
-#         return AbstractMCMC.mcmcsample(
-#             rng,
-#             model,
-#             sampler,
-#             N;
-#             chain_type=chain_type,
-#             progress=progress,
-#             num_warmup = num_warmup,
-#             discard_initial = discard_initial,
-#             kwargs...,
-#         )
-#     else
-#         return AbstractMCMC.mcmcsample(
-#             rng,
-#             model,
-#             sampler,
-#             N;
-#             chain_type=chain_type,
-#             initial_state=initial_state,
-#             progress=progress,
-#             num_warmup = 0,
-#             discard_initial=0,
-#             kwargs...,
-#         )
-#     end
-# end

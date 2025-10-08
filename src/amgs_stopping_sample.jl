@@ -488,8 +488,43 @@ function DynamicPPL.assume(
     return DynamicPPL.assume(dist, vn, vi)
 end
 
+"""
+    getlogevidence(transitions, sampler, state)
+
+Get the log evidence from a collection of transitions. For AMGS samplers, this returns `missing` as log evidence computation is not implemented.
+
+# Arguments
+- `transitions`: Vector of transitions from the sampling process.
+- `sampler::DynamicPPL.Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
+- `state`: The final sampler state.
+
+# Returns
+`missing` (log evidence computation not implemented for AMGS samplers).
+"""
 getlogevidence(transitions, sampler::DynamicPPL.Sampler{<:AMGS_Stopping_Sampler}, state) = missing
 
+"""
+    AbstractMCMC.bundle_samples(ts, model, spl, state, chain_type; kwargs...)
+
+Bundle the sampling results into an MCMCChains.Chains object.
+
+# Arguments
+- `ts::Vector{<:Turing.Inference.Transition}`: Vector of transitions from the sampling process.
+- `model::AbstractMCMC.AbstractModel`: The model.
+- `spl::DynamicPPL.Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
+- `state`: The final sampler state.
+- `chain_type::Type{MCMCChains.Chains}`: The type of chain to create.
+- `save_state::Bool`: Whether to save the sampler state in the chain info.
+- `stats`: Timing statistics (optional).
+- `sort_chain::Bool`: Whether to sort the chain variables.
+- `include_varname_to_symbol::Bool`: Whether to include variable name mappings.
+- `discard_initial::Int`: Number of initial samples to discard.
+- `thinning::Int`: Thinning factor for the chain.
+- `kwargs...`: Additional keyword arguments.
+
+# Returns
+An `MCMCChains.Chains` object containing the bundled samples.
+"""
 function AbstractMCMC.bundle_samples(
     ts::Vector{<:Turing.Inference.Transition},
     model::AbstractMCMC.AbstractModel,

@@ -3,6 +3,34 @@
 
 # Start by defining the sampler
 
+"""
+    new_AMGS_Sampler(acceptance_rate, convergence_step, use_noise_stabiliser, noise_scaling; use_custom_init=false, init_covariance=zeros(Float64, 0, 0))
+
+Experimental variant of the Adaptive Metropolis-within-Gibbs sampler with custom initialization.
+
+This sampler allows for custom initialization of the covariance matrix, which can be
+useful for warm-starting adaptation with prior knowledge about parameter scales or
+correlations.
+
+# Fields
+- `acceptance_rate::Real`: target acceptance rate for the Robbins–Monro update.
+- `convergence_step::Real`: controls the step-size decay in adaptation (power).
+- `use_noise_stabiliser::Bool`: whether to add noise to prevent covariance degeneracy.
+- `noise_scaling::Real`: variance scale used by the optional noise stabiliser.
+- `use_custom_init::Bool`: whether to use custom initial covariance.
+- `init_covariance::Matrix`: custom initial covariance matrix (ignored if use_custom_init=false).
+
+# Examples
+```julia
+# With custom initialization
+init_cov = diagm([1.0, 0.1, 0.01])  # Different scales for different parameters
+sampler = new_AMGS_Sampler(0.234, 1000, false, 1e-6, true, init_cov)
+chain = sample(model, sampler, 1000)
+```
+
+TODO: Add detailed explanation of initialization benefits and when to use custom covariance.
+TODO: Explain how init_covariance dimensions should match the model parameters.
+"""
 struct new_AMGS_Sampler{ T_accep <: Real, T_conv_step <: Real, T_scale <: Real, T_el_cov_mat } <: Turing.InferenceAlgorithm
     acceptance_rate::T_accep
     convergence_step::T_conv_step
@@ -33,6 +61,21 @@ DynamicPPL.default_chain_type(sampler::Sampler{<:new_AMGS_Sampler}) = MCMCChains
 
 # Define the state of the sampler
 # Contains Important quantities for computation of the updated kernel
+"""
+    newAMGSState
+
+State container used by the new AMGS sampler to store running statistics
+required for adaptation with custom initialization.
+
+# Fields
+- `transition`: the latest `Turing.Inference.Transition` object.
+- `varinfo`: the `VarInfo` corresponding to the current parameter values.
+- `μ`: running mean vector of parameters.
+- `kernel`: running covariance (or scale) matrix used for proposals.
+- `step`: integer step counter for adaptation scheduling.
+- `β`: scalar adapt scaling for acceptance rate control.
+- `logjoint_internal`: cached log joint density for the current state.
+"""
 struct newAMGSState{
     TTrans<:Turing.Inference.Transition,
     TVI<:AbstractVarInfo,

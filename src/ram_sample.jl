@@ -34,6 +34,19 @@ DynamicPPL.default_chain_type(sampler::Sampler{<:RAM_Sampler}) = MCMCChains.Chai
 
 # Define the state of the sampler
 # Contains Important quantities for computation of the updated kernel
+"""
+    RAMState
+
+State container used by the RAM (Robust Adaptive Metropolis) sampler to store running statistics
+required for adaptation using Cholesky-based proposals.
+
+# Fields
+- `transition`: the latest `Turing.Inference.Transition` object.
+- `varinfo`: the `VarInfo` corresponding to the current parameter values.
+- `kernel`: Cholesky factor of the running covariance matrix used for proposals.
+- `step`: integer step counter for adaptation scheduling.
+- `logjoint_internal`: cached log joint density for the current state.
+"""
 struct RAMState{
     TTrans<:Turing.Inference.Transition,
     TVI<:AbstractVarInfo,
