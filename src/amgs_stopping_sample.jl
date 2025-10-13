@@ -1,4 +1,4 @@
-# write a functions step and step_warmup which are used in the AMGS_Stopping_sampler.
+# write a functions step and step_warmup which are used in the AMGS_Stopping_Sampler.
 # Write code based on algorithm 4 in https://link.springer.com/article/10.1007/s11222-008-9110-y combined with the extensions in the appendix of https://arxiv.org/abs/2408.04178 (note appendix to be published soon)
 
 # Start by defining the sampler
@@ -16,7 +16,7 @@ struct AMGS_Stopping_Sampler{T_accep <: Real, T_conv_step <: Real, T_adapt_perio
 end
 
 """
-    AMGS_Stopping_Sampler(acceptance_rate, convergence_step, max_adapt_period, lower_stopping_accep, upper_stopping_accep, average_interval, space::Tuple; noise_stabiliser = false, noise_stabiliser_scaling = 1e-6)
+    AMGS_Stopping_Sampler(acceptance_rate, convergence_step, max_adapt_period, lower_stopping_accep, upper_stopping_accep, average_interval)
 
 Construct an `AMGS_Stopping_Sampler` object.
 
@@ -27,11 +27,9 @@ Construct an `AMGS_Stopping_Sampler` object.
 - `lower_stopping_accep::Real`: The lower bound for stopping acceptance rate.
 - `upper_stopping_accep::Real`: The upper bound for stopping acceptance rate.
 - `average_interval::Integer`: The interval for averaging acceptance rates.
-- `noise_stabiliser::Bool`: (Optional) Whether to use a noise stabiliser, defaults to false.
-- `noise_stabiliser_scaling::Real`: (Optional) The scaling of the noise stabiliser, defaults to 1e-6.
 
 # Returns
-An `AMGS_Stopping_Sampler` instance.
+An `AMGS_Stopping_Sampler` instance with `use_noise_stabiliser = false` and `noise_scaling = 1e-6`.
 """
 function AMGS_Stopping_Sampler(
     acceptance_rate::T1,
@@ -56,12 +54,17 @@ The state object for the AMGS Stopping sampler.
 
 # Fields
 - `transition::TTrans`: The current transition object.
+- `varinfo::TVI`: The variable information.
 - `μ::Tμ`: The current mean vector of the target distribution.
 - `kernel::TKernel`: The current covariance kernel.
 - `step::TStep`: The current step number.
 - `β::Tβ`: The global scale parameter.
 - `Δi::TΔi`: The vector of recent acceptance values.
 - `stopped::Bool`: Whether the adaptation process has stopped.
+- `logjoint_internal::TL`: The cached log joint density.
+- `mean_accep::TAccep`: Running average of acceptance rates for stopping criteria.
+- `μ_running_avg::Tμ`: Running average of parameter means for convergence monitoring.
+- `kernel_running_calc::TKernel`: Running covariance calculation for numerical stability.
 """
 struct AMGSStoppingState{
     TTrans<:Turing.Inference.Transition,
@@ -71,7 +74,8 @@ struct AMGSStoppingState{
     TStep<:Integer,
     Tβ<:Real,
     TΔi<:Vector,
-    TL<:Real
+    TL<:Real,
+    TAccep<:Real,
 }
     transition::TTrans
     varinfo::TVI
@@ -82,6 +86,9 @@ struct AMGSStoppingState{
     Δi::TΔi
     stopped::Bool
     logjoint_internal::TL
+    mean_accep::TAccep
+    μ_running_avg::Tμ
+    kernel_running_calc::TKernel
 end
 
 # Define the initial state of the sampler
@@ -107,11 +114,11 @@ function init_AMGSStoppingState(
     sampler::DynamicPPL.Sampler{<:AMGS_Stopping_Sampler}
 ) where {T_trans <: Turing.Inference.Transition, TVI <: AbstractVarInfo, T_μ <: Real, T_kernel <: Matrix}
     ## copy vector length of mu and initialise zero vector for beta
-    step = 1
+    step = 0
     β = zero(eltype(μ))
     Δi = zeros(eltype(μ), sampler.alg.average_interval)
     lp = DynamicPPL.getlogjoint_internal(varinfo)
-    AMGSStoppingState{T_trans, TVI, Vector{T_μ}, T_kernel, Int, typeof(β), typeof(Δi), typeof(lp)}(transition, varinfo, μ, kernel, step, β, Δi, false, lp)
+    AMGSStoppingState{T_trans, TVI, Vector{T_μ}, T_kernel, Int, typeof(β), typeof(Δi), typeof(lp), Float64}(transition, varinfo, μ, kernel, step, β, Δi, false, lp, 0.0, μ, zero(kernel))
 end
 
 # Define the initial state of the sampler in a 1D case
@@ -137,12 +144,12 @@ function init_AMGSStoppingState(
     sampler::DynamicPPL.Sampler{<:AMGS_Stopping_Sampler}
 ) where {T_trans <: Turing.Inference.Transition, TVI <: AbstractVarInfo, T_μ <: Real, T_kernel <: Matrix}
     ## copy vector length of mu and initialise zero vector for beta
-    step = 1
+    step = 0
     β = zero(typeof(μ))
-    μ = [μ]
+    new_μ = [μ]
     Δi = zeros(typeof(μ), sampler.alg.average_interval)
     lp = DynamicPPL.getlogjoint_internal(varinfo)
-    AMGSStoppingState{T_trans, TVI, typeof(μ), T_kernel, Int, typeof(β),typeof(Δi), typeof(lp)}(transition, varinfo, μ, kernel, step, β, Δi, false, lp)
+    AMGSStoppingState{T_trans, TVI, typeof(new_μ), T_kernel, Int, typeof(β),typeof(Δi), typeof(lp), Float64}(transition, varinfo, new_μ, kernel, step, β, Δi, false, lp, 0.0, new_μ, zero(kernel))
 end
 
 # Write a function which updates the kernel
@@ -176,8 +183,102 @@ function update_kernel(state::AMGSStoppingState, trans::T, spl::Sampler{<:AMGS_S
     # Add noise to the kernel if requested
     noise_term = spl.alg.use_noise_stabiliser * spl.alg.noise_scaling * η * rand(size(Δ)[1])
     Σ = (1.0 - η) * Σ + (η * (Δ * (Δ'))) + diagm(noise_term)
-    new_state = AMGSStoppingState(trans, state.varinfo, μ, Σ, step + 1, β, state.Δi, state.stopped, state.logjoint_internal)
+    
+    # Reset the running covariance and mean calculation
+    new_state = AMGSStoppingState(trans, state.varinfo, μ, Σ, step + 1, β, state.Δi, state.stopped, state.logjoint_internal, 0.0, zero(μ), zero(Σ))
     return new_state
+end
+
+# Function to check whether to stop adapting
+"""
+    check_end_adaptation(state, accepted, spl)
+
+Check whether adaptation should stop based on the current state and acceptance criteria.
+
+# Arguments
+- `state::AMGSStoppingState`: The current sampler state.
+- `accepted::Bool`: Whether the current proposal was accepted.
+- `spl::Sampler{<:AMGS_Stopping_Sampler}`: The AMGS Stopping sampler.
+
+# Returns
+`true` if adaptation should stop, `false` otherwise.
+"""
+function check_end_adaptation(state::AMGSStoppingState, accepted::Bool, spl::Sampler{<:AMGS_Stopping_Sampler})
+    # Only check if this step we are at the end of an adaptation interval
+    if ((state.step + 1) % spl.alg.average_interval) !== 0
+        return false
+    end
+    
+    # End if we have hit the max adaptation steps
+    if (spl.alg.max_adapt_period != -1) && (state.step >= spl.alg.max_adapt_period)
+        return true
+    end
+
+    # Check whether to stop adapting
+    if (state.mean_accep > spl.alg.lower_stopping_accep) && (state.mean_accep < spl.alg.upper_stopping_accep)
+        return true
+    end
+    return false
+end
+
+# update the runing mean and covariance
+# Use Welford's online algorithm for numerical stability
+"""
+    running_update_state(state, step_mod, accepted, spl)
+
+Update the running statistics for the stopping sampler using Welford's online algorithm.
+
+# Arguments
+- `state::AMGSStoppingState`: The current sampler state.
+- `step_mod::Int`: The step modulo for tracking adaptation intervals.
+- `accepted::Bool`: Whether the current proposal was accepted.
+- `spl`: The sampler.
+
+# Returns
+The updated state with new running statistics.
+"""
+function running_update_state(state::AMGSStoppingState, step_mod::Int, accepted::Bool, spl)
+    if state.stopped
+        return state
+    end
+    # Check whether to stop adapting
+    stop_adapting = check_end_adaptation(state, accepted, spl)
+    theta = state.varinfo[:]
+    if step_mod == 0
+        state = AMGSStoppingState(
+            state.transition,
+            state.varinfo,
+            state.μ,
+            state.kernel,
+            state.step + 1,
+            state.β,
+            state.Δi,
+            stop_adapting,
+            state.logjoint_internal,
+            state.mean_accep + accepted / spl.alg.average_interval,
+            theta,
+            state.kernel,
+        )
+    else     
+        n = step_mod + 1
+        δ = theta .- state.μ_running_avg
+        running_μ = state.μ_running_avg .+ δ ./ n
+        state = AMGSStoppingState(
+            state.transition,
+            state.varinfo,
+            state.μ,
+            state.kernel,
+            state.step + 1,
+            state.β,
+            state.Δi,
+            stop_adapting,
+            state.logjoint_internal,
+            state.mean_accep + accepted / spl.alg.average_interval,
+            running_μ,
+            (step_mod * state.kernel_running_calc .+ δ * transpose(theta .- running_μ)) ./ n,
+        )
+    end
+    return state
 end
 
 # Function to set the new parameters (for use with gibbs sampler)
@@ -203,7 +304,7 @@ function Turing.Inference.setparams_varinfo!!(
     lp = DynamicPPL.getlogjoint_internal(vi)
     # #update the model state
     new_transition = Turing.Inference.Transition(model, vi, nothing)
-    new_state = AMGSStoppingState(new_transition, vi, state.μ, state.kernel, state.step, state.β, state.Δi, state.stopped, lp) 
+    new_state = AMGSStoppingState(new_transition, vi, state.μ, state.kernel, state.step, state.β, state.Δi, state.stopped, lp, state.mean_accep, state.μ_running_avg, state.kernel_running_calc) 
     
     # Update the VarInfo with the new log density
     return new_state
@@ -400,23 +501,25 @@ function AbstractMCMC.step(
     accep = mh_accept_logdens(rng, lp_proposal, lp_old)
 
     # Construct the transition object to be returned
-    if !accep
-        new_trans = prev_transition
-    else
-        new_trans = proposal_state.transition
-    end
+    new_trans = accep ? proposal_state.transition : prev_transition
 
-    # Update Δi if accepted and there is a non-zero averaging interval
-    if accep && spl.alg.average_interval >= 1
-        # (Want to update only the Δi[1] element as we can guarantee adaptation has started as long as the averaging interval is greater than 0)
-        new_state_Δi = copy(proposal_state.Δi)
-        new_state_Δi[1] = 1
-        new_state = AMGSStoppingState(proposal_state.transition, proposal_state.varinfo, proposal_state.μ, proposal_state.kernel, proposal_state.step, proposal_state.β, new_state_Δi, proposal_state.stopped, proposal_state.logjoint_internal)
+    # Construct the initial state of the sampler
+    upd_state = accep ? proposal_state : orig_state
+    
+    # Update the running mean and covariance and check whether the adaptation should stop
+    upd_state = running_update_state(upd_state, upd_state.step % spl.alg.average_interval, accep, spl)
+
+    # If stopped, do not update the kernel
+    if upd_state.stopped
+        return new_trans, upd_state
     end
 
     # Update the kernel and return the new transition and state
-    prob = exp(min(0.0, -(lp_proposal - lp_old)))
-    upd_state = update_kernel(new_state, new_trans, spl, prob)
+    prob = exp(min(0.0, (lp_proposal - lp_old)))
+    
+    if (upd_state.step % spl.alg.average_interval) == 0
+        _, upd_state = update_kernel(upd_state, new_trans, spl, prob)
+    end
 
     return new_trans, upd_state
 end
@@ -455,29 +558,21 @@ function AbstractMCMC.step(
     # Check whether to accept the new parameters
     accep = mh_accept_logdens(rng, lp_proposal, lp_old)
 
-    new_trans = accep ? proposal_state.transition : state.transition
-        
-    # Update Δi with the new acceptance
-    upd_Δi = vcat(state.Δi[2:end], [accep])
+    # Construct the transition object to be returned
+    new_trans = accep ? proposal_state.transition : state.transition 
+    new_state = accep ? proposal_state : state
 
-    # Calculate the acceptance probability
-    prob = exp(min(0.0, (lp_proposal - lp_old)))
+    # Update the running mean and covariance and check whether the adaptation should stop
+    new_state = running_update_state(new_state, new_state.step % spl.alg.average_interval, accep, spl)
 
-    # Determine if the adaptation should stop
-    stopped = state.stopped || (spl.alg.average_interval == 0) ||
-        (state.step + 1 >= spl.alg.max_adapt_period) ||
-        ifelse(ismissing(spl.alg.average_interval), false, ((sum(upd_Δi) / spl.alg.average_interval <= spl.alg.upper_stopping_accep) &&
-            (sum(upd_Δi) / spl.alg.average_interval >= spl.alg.lower_stopping_accep) &&
-            (((state.step + 1) % spl.alg.average_interval) == 0)))
-
-    # Create a new state object
-    new_state = AMGSStoppingState(new_trans, accep ? proposal_state.varinfo : state.varinfo, state.μ, state.kernel, state.step, state.β, upd_Δi, stopped, accep ? proposal_state.logjoint_internal : state.logjoint_internal)
-
-    # Update the kernel if adaptation has not stopped
-    if !new_state.stopped
-        new_state = update_kernel(new_state, new_trans, spl, prob)
+    #if stopped, do not update the kernel
+    if new_state.stopped
+        return new_trans, new_state
     end
-
+    
+    # Update the kernel and return the new transition and state
+    prob = exp(min(0.0, (lp_proposal - lp_old)))
+    _, new_state = update_kernel(new_state, new_trans, spl, prob)
     return new_trans, new_state
 end
 
