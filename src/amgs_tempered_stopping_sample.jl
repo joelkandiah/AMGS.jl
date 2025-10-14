@@ -133,7 +133,7 @@ function init_AMGSStoppingTemperedState(
     step = 0
     β = zero(eltype(μ))
     lp = DynamicPPL.getlogjoint_internal(varinfo) # Get the log joint density
-    t_lp = DynamicPPL.getlogprior(varinfo) + temp * DynamicPPL.getloglikelihood(varinfo) - DynamicPPL.getlogjac(varinfo)
+    t_lp = temp * (DynamicPPL.getlogprior(varinfo) + DynamicPPL.getloglikelihood(varinfo)) - DynamicPPL.getlogjac(varinfo)
     AMGSStoppingTemperedState{T_trans, TVI, typeof(μ), T_kernel, Int, typeof(β), typeof(lp), typeof(t_lp), Float64}(transition, varinfo, μ, kernel, step, β, lp, t_lp, 0.0, μ, zero(kernel), false)
 end
 
@@ -160,7 +160,7 @@ function init_AMGSStoppingTemperedState(
     β = zero(typeof(μ))
     new_μ = [μ]
     lp = DynamicPPL.getlogjoint_internal(varinfo) # Get the log joint density
-    t_lp = DynamicPPL.getlogprior(varinfo) + temp * DynamicPPL.getloglikelihood(varinfo) - DynamicPPL.getlogjac(varinfo)
+    t_lp = temp * (DynamicPPL.getlogprior(varinfo) + DynamicPPL.getloglikelihood(varinfo)) - DynamicPPL.getlogjac(varinfo)
     AMGSStoppingTemperedState{T_trans, TVI, typeof(new_μ), T_kernel, Int, typeof(β), typeof(lp), typeof(t_lp), Float64}(transition, varinfo, new_μ, kernel, step, β, lp, t_lp, 0.0, new_μ, zero(kernel), false)
 end
 
@@ -234,7 +234,7 @@ function Turing.Inference.setparams_varinfo!!(
     vi  = last(DynamicPPL.evaluate!!(model, params)) 
 
     lp = DynamicPPL.getlogjoint_internal(vi)
-    tempered_lp = DynamicPPL.getlogprior(vi) + sampler.alg.temperature * DynamicPPL.getloglikelihood(vi) - DynamicPPL.getlogjac(vi)
+    tempered_lp = sampler.alg.temperature * (DynamicPPL.getlogprior(vi) + DynamicPPL.getloglikelihood(vi)) - DynamicPPL.getlogjac(vi)
     # update the model state
     new_transition = Turing.Inference.Transition(model, vi, (; lp_tempered = tempered_lp, lp_internal = lp))
     new_state = AMGSStoppingTemperedState(new_transition, vi, state.μ, state.kernel, state.step, state.β, lp, tempered_lp, state.mean_accep, state.μ_running_avg, state.kernel_running_calc, state.stopped) 
@@ -405,7 +405,7 @@ function AbstractMCMC.step_warmup(
 
     # Get the log density of the current parameters
     lp_old = DynamicPPL.getlogjoint_internal(vis)
-    prev_transition = Turing.Inference.Transition(model, vis, (; lp_tempered = DynamicPPL.getlogprior(vis) + spl.alg.temperature * DynamicPPL.getloglikelihood(vis) - DynamicPPL.getlogjac(vis), lp_internal = lp_old))
+    prev_transition = Turing.Inference.Transition(model, vis, (; lp_tempered = spl.alg.temperature * (DynamicPPL.getlogprior(vis) + DynamicPPL.getloglikelihood(vis)) - DynamicPPL.getlogjac(vis), lp_internal = lp_old))
 
     # Get the parameters of interest and create the covariance matrix
     theta = vis[:]
@@ -498,7 +498,7 @@ function AbstractMCMC.step(
     # lp_old = DynamicPPL.getlogjoint_internal(vis)
 
     # Create a transition object in case of rejection
-    prev_transition = Turing.Inference.Transition(model, vis, (;lp_tempered = DynamicPPL.getlogprior(vis) + spl.alg.temperature * DynamicPPL.getloglikelihood(vis) - DynamicPPL.getlogjac(vis), lp_internal = DynamicPPL.getlogjoint_internal(vis)))
+    prev_transition = Turing.Inference.Transition(model, vis, (;lp_tempered = spl.alg.temperature * (DynamicPPL.getlogprior(vis) + DynamicPPL.getloglikelihood(vis)) - DynamicPPL.getlogjac(vis), lp_internal = DynamicPPL.getlogjoint_internal(vis)))
 
     # Get the parameters of interest and create the covariance matrix
     theta = vis[:]
