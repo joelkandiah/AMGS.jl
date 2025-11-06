@@ -215,8 +215,8 @@ function Turing.Inference.setparams_varinfo!!(
     model::DynamicPPL.Model,
     sampler::Sampler{<:AMGS_DA_Sampler},
     state::AMGSDAState,
-    params::AbstractVarInfo,
-)
+    params::T,
+    ) where {T <: AbstractVarInfo}
 
     # Update the vi
     # vi = state.varinfo

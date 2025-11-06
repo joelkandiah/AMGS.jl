@@ -55,7 +55,7 @@ using LoopVectorization
 #TODO: Extend these samplers to use the Gibbs sampling style mechanism for block samplers (want to wrap these samplers)
 #TODO: Convert the stopping sampler into a wrapper for the other adaptive samplers (it ony really needs the computed acceptance rate and the state from the returns from each step so perhaps just a wrapper on the step function)
 # TODO update the documenting comments
-export step, step_warmup, bundle_samples, isgibbscomponent, setparams_varinfo!!, drop_space, setparams!!, get_varinfo, _add_noise!
+export step, step_warmup, bundle_samples, isgibbscomponent, Turing.Inference.setparams_varinfo!!, drop_space, setparams!!, get_varinfo, _add_noise!
 
 # Functions which use a few different MH samplers
 export AMGS_Sampler, AMGS_DA_Sampler, AMGS_Tempered_Sampler, AMGS_Stopping_Sampler, AMGS_Stopping_Tempered_Sampler, RAM_Sampler, Bayes_AMGS_Sampler, DRAMGS_Sampler, new_AMGS_Sampler, AMGS_SGS_Sampler 
