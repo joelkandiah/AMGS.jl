@@ -141,7 +141,7 @@ end
 
 # Write a function which updates the kernel
 """
-    _add_noise!(Δ², noise_scaling, θ_size, use_noise_stabiliser)
+    _add_noise!(rng, Δ², noise_scaling, θ_size, use_noise_stabiliser)
 
 Add diagonal noise to `Δ²` when `use_noise_stabiliser` is true. This can help
 prevent degeneracy of the running covariance matrix during adaptation.
@@ -155,17 +155,17 @@ Recommended `noise_scaling` values are typically small (1e-6 to 1e-4) and should
 be much smaller than the typical parameter variances to avoid biasing the
 adaptation too strongly.
 """
-function _add_noise!(Δ², noise_scaling, θ_size, ::Val{true})
-    Δ² .= Δ² .+ diagm(noise_scaling .* rand(θ_size))
+function _add_noise!(rng::T, Δ², noise_scaling, θ_size, ::Val{true}) where {T <:AbstractRNG}
+    Δ² .= Δ² .+ diagm(noise_scaling .* rand(rng, θ_size))
 end
 
-function _add_noise!(Δ², noise_scaling, θ_size, ::Val{false})
+function _add_noise!(rng::T, Δ², noise_scaling, θ_size, ::Val{false}) where {T <: AbstractRNG}
     # No-op when stabiliser disabled
 end
 
 
 """
-    update_kernel(state, trans, spl, prob)
+    update_kernel(rng, state, trans, spl, prob)
 
 Perform a Robbins–Monro style update of the running mean and covariance
 (`state.μ` and `state.kernel`) given an acceptance probability `prob`.
@@ -185,7 +185,7 @@ Returns the updated kernel and a new `AMGSState`.
 TODO: Add mathematical derivation of Robbins-Monro convergence properties.
 TODO: Explain the relationship between convergence_step and adaptation speed.
 """
-function update_kernel(state::AMGSState, trans::T, spl::Sampler{<:AMGS_Sampler}, prob::T3) where {T <: Turing.Inference.Transition, T3 <: Real}
+function update_kernel(rng::TRNG, state::AMGSState, trans::T, spl::Sampler{<:AMGS_Sampler}, prob::T3) where {T <: Turing.Inference.Transition, T3 <: Real, TRNG <: AbstractRNG}
     μ    = state.μ
     step = state.step
     state.Δ_cache .= state.varinfo[:]
@@ -216,7 +216,7 @@ function update_kernel(state::AMGSState, trans::T, spl::Sampler{<:AMGS_Sampler},
         end
 
         # Optional noise stabilisation (fast Val dispatch)
-        @inline _add_noise!(state.kernel, spl.alg.noise_scaling, n, spl.alg.use_noise_stabiliser)
+        @inline _add_noise!(rng, state.kernel, spl.alg.noise_scaling, n, spl.alg.use_noise_stabiliser)
     end 
     return state.kernel, AMGSState(trans, state.varinfo, μ, state.kernel, step + 1, β, state.logjoint_internal, state.Δ_cache)
 end
@@ -429,7 +429,7 @@ function AbstractMCMC.step(
 
     # Update the kernel and return the new transition and state
     prob = exp(min(0.0, (lp_proposal - lp_old)))
-    _, upd_state = update_kernel(accep ? proposal_state : orig_state, new_trans, spl, prob)
+    _, upd_state = update_kernel(rng, accep ? proposal_state : orig_state, new_trans, spl, prob)
     
     return new_trans, upd_state
 end
@@ -467,7 +467,7 @@ function AbstractMCMC.step(
 
     # Update the kernel and return the new transition and state
     prob = exp(min(0.0, (lp_proposal - lp_old)))
-    _, new_state = update_kernel(accep ? proposal_state : state, new_trans, spl, prob)
+    _, new_state = update_kernel(rng, accep ? proposal_state : state, new_trans, spl, prob)
     return new_trans, new_state
 end
 

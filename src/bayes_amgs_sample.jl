@@ -165,7 +165,7 @@ end
 
 # Write a function which updates the kernel
 """
-    update_kernel(state::BayesAMGSState, trans::Turing.Inference.Transition, spl::Sampler{<:Bayes_AMGS_Sampler}, prob::T3) where {T3 <: Real}
+    update_kernel(rng::TRNG, state::BayesAMGSState, trans::Turing.Inference.Transition, spl::Sampler{<:Bayes_AMGS_Sampler}, prob::T3) where {T3 <: Real, TRNG <: AbstractRNG}
 
 Update the kernel matrix of the Bayes AMGS sampler state based on the new transition and acceptance probability.
 
@@ -175,7 +175,7 @@ Update the kernel matrix of the Bayes AMGS sampler state based on the new transi
 - `spl::Sampler{<:Bayes_AMGS_Sampler}`: The Bayes AMGS sampler.
 - `prob::T3`: The acceptance probability.
 """
-function update_kernel(state::BayesAMGSState, trans::Turing.Inference.Transition, spl::Sampler{<:Bayes_AMGS_Sampler}, prob::T3) where {T3 <: Real}
+function update_kernel(rng::TRNG, state::BayesAMGSState, trans::Turing.Inference.Transition, spl::Sampler{<:Bayes_AMGS_Sampler}, prob::T3) where {T3 <: Real, TRNG <: AbstractRNG}
     # Grab useful quantities from the state
     S = state.kernel
     step = state.step
@@ -203,17 +203,17 @@ function update_kernel(state::BayesAMGSState, trans::Turing.Inference.Transition
     if step == 1
         X̄ = (X_n + X_n1) ./ 2.0
         S = (1.0 / (ν + state.d + 3.0)) * ((X_n1 * X_n1') + (X_n * X_n') - 2.0 * (X̄ * X̄') + (ν + d + 1.0) * S)
-        S = S + diagm(noise_term .* rand(size(X_n)[1]))
+        S = S + diagm(noise_term .* rand(rng, size(X_n)[1]))
     elseif f_step == f_prev_step
         X̄ = ((step - f_step) / (step - f_step + 1.0)) * μ + (1.0 / (step - f_step + 1.0)) * X_n
         S = (1.0 / (step - f_step + ν + d + 2.0)) * ((step - f_step + ν + d + 1.0) * S + (X_n * X_n') + (step - f_step) * (μ * μ') - (step - f_step + 1.0) * (X̄ * X̄'))
-        S = S + diagm(noise_term .* rand(size(X_n)[1]))
+        S = S + diagm(noise_term .* rand(rng, size(X_n)[1]))
 
     elseif f_step == f_prev_step + 1
         Xfn1 = get_index_ll(step - f_step + 2, vec_X)
         X̄ = μ + (1.0 / (step - f_step + 1)) * (X_n - Xfn1)
         S = S + (1.0 / (step - f_step + ν + d + 2.0)) * ((X_n * X_n') - (Xfn1 * Xfn1') + (step - f_step + 1.0) * ((μ * μ') - (X̄ * X̄')))
-        S = S + diagm(noise_term .* rand(size(X_n)[1]))
+        S = S + diagm(noise_term .* rand(rng, size(X_n)[1]))
     end
 
     λ = max(spl.alg.λ_min, λ * exp((δ / (n_start + step)) * (prob - spl.alg.acceptance_rate)))
@@ -453,7 +453,7 @@ function AbstractMCMC.step(
 
     new_trans = accep ? proposal_state : prev_transition
     prob = exp(min(0.0,-(lp_proposal - lp_old)))
-    upd_state = update_kernel(accep ? proposal_state : orig_state, new_trans, spl, prob)
+    upd_state = update_kernel(rng, accep ? proposal_state : orig_state, new_trans, spl, prob)
 
     return new_trans, upd_state
 end
@@ -488,7 +488,7 @@ function AbstractMCMC.step(
     new_trans = accep ? proposal_state.transition : state.transition
 
     prob = exp(min(0.0,(lp_proposal - lp_old)))
-    new_state = update_kernel(state, new_trans, spl, prob)
+    new_state = update_kernel(rng, state, new_trans, spl, prob)
 
     return new_trans, new_state
 end

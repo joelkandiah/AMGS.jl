@@ -154,7 +154,7 @@ end
 
 # Write a function which updates the kernel
 """
-    update_kernel(state, trans, spl, prob)
+    update_kernel(rng, state, trans, spl, prob)
 
 Update the kernel matrix, mean vector, and other internal quantities of the `AMGSStoppingState`.
 
@@ -167,7 +167,7 @@ Update the kernel matrix, mean vector, and other internal quantities of the `AMG
 # Returns
 A new `AMGSStoppingState` with updated quantities.
 """
-function update_kernel(state::AMGSStoppingState, trans::T, spl::Sampler{<:AMGS_Stopping_Sampler}, prob::T3) where {T <: Turing.Inference.Transition, T3 <: Real}
+function update_kernel(rng::TRNG, state::AMGSStoppingState, trans::T, spl::Sampler{<:AMGS_Stopping_Sampler}, prob::T3) where {T <: Turing.Inference.Transition, T3 <: Real, TRNG <: AbstractRNG}
     # Grab useful quantities from the state
     Σ = state.kernel
     μ = state.μ
@@ -181,7 +181,7 @@ function update_kernel(state::AMGSStoppingState, trans::T, spl::Sampler{<:AMGS_S
     μ = (1.0 - η) * μ + (η * state.varinfo[:])
     
     # Add noise to the kernel if requested
-    noise_term = spl.alg.use_noise_stabiliser * spl.alg.noise_scaling * η * rand(size(Δ)[1])
+    noise_term = spl.alg.use_noise_stabiliser * spl.alg.noise_scaling * η * rand(rng, size(Δ)[1])
     Σ = (1.0 - η) * Σ + (η * (Δ * (Δ'))) + diagm(noise_term)
     
     # Reset the running covariance and mean calculation
@@ -518,7 +518,7 @@ function AbstractMCMC.step(
     prob = exp(min(0.0, (lp_proposal - lp_old)))
     
     if (upd_state.step % spl.alg.average_interval) == 0
-        _, upd_state = update_kernel(upd_state, new_trans, spl, prob)
+        _, upd_state = update_kernel(rng, upd_state, new_trans, spl, prob)
     end
 
     return new_trans, upd_state
@@ -572,7 +572,7 @@ function AbstractMCMC.step(
     
     # Update the kernel and return the new transition and state
     prob = exp(min(0.0, (lp_proposal - lp_old)))
-    _, new_state = update_kernel(new_state, new_trans, spl, prob)
+    _, new_state = update_kernel(rng, new_state, new_trans, spl, prob)
     return new_trans, new_state
 end
 

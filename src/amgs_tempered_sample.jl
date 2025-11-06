@@ -149,7 +149,7 @@ function init_AMGSTemperedState(
 end
 
 """
-    update_kernel(state::AMGSTemperedState, trans::T, spl::Sampler{<:AMGS_Tempered_Sampler}, prob::T3) where {T <: Turing.Inference.Transition, T3 <: Real}
+    update_kernel(rng::TRNG, state::AMGSTemperedState, trans::T, spl::Sampler{<:AMGS_Tempered_Sampler}, prob::T3) where {T <: Turing.Inference.Transition, T3 <: Real, TRNG <: AbstractRNG}
 
 Update the kernel matrix, and internal quantities of the AMGS Tempered sampler state based on the new transition and acceptance probability.
 
@@ -159,7 +159,7 @@ Update the kernel matrix, and internal quantities of the AMGS Tempered sampler s
 - `spl::Sampler{<:AMGS_Tempered_Sampler}`: The AMGS sampler.
 - `prob::T3`: The acceptance probability.
 """
-function update_kernel(state::AMGSTemperedState, trans::T, spl::Sampler{<:AMGS_Tempered_Sampler}, prob::T3) where {T <: Turing.Inference.Transition, T3 <: Real}
+function update_kernel(rng::TRNG, state::AMGSTemperedState, trans::T, spl::Sampler{<:AMGS_Tempered_Sampler}, prob::T3) where {T <: Turing.Inference.Transition, T3 <: Real, TRNG <: AbstractRNG}
     μ    = state.μ
     step = state.step
     Δ    = state.varinfo[:]
@@ -190,7 +190,7 @@ function update_kernel(state::AMGSTemperedState, trans::T, spl::Sampler{<:AMGS_T
         end
 
         # Optional noise stabilisation (fast Val dispatch)
-        @inline _add_noise!(state.kernel, spl.alg.noise_scaling, n, spl.alg.use_noise_stabiliser)
+        @inline _add_noise!(rng, state.kernel, spl.alg.noise_scaling, n, spl.alg.use_noise_stabiliser)
     end
     return state.kernel, AMGSTemperedState(trans, state.varinfo, μ, state.kernel, step + 1, β, state.logjoint_internal, state.logjoint_tempered)
 end
@@ -411,7 +411,7 @@ function AbstractMCMC.step(
 
     # Update the kernel and return the new transition and state
     prob = exp(min(0.0, (lp_proposal - lp_old)))
-    _, upd_state = update_kernel(accep ? proposal_state : orig_state, new_trans, spl, prob)
+    _, upd_state = update_kernel(rng, accep ? proposal_state : orig_state, new_trans, spl, prob)
     
     return new_trans, upd_state
 end
@@ -449,7 +449,7 @@ function AbstractMCMC.step(
 
     # Update the kernel and return the new transition and state
     prob = exp(min(0.0, (lp_proposal - lp_old)))
-    _, new_state = update_kernel(accep ? proposal_state : state, new_trans, spl, prob)
+    _, new_state = update_kernel(rng, accep ? proposal_state : state, new_trans, spl, prob)
     return new_trans, new_state
 end
 

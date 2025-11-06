@@ -151,7 +151,7 @@ function init_AMGSDAState(
 end
 
 """
-    update_kernel(state::AMGSDAState, trans::T, spl::Sampler{<:AMGS_DA_Sampler}, prob::T3) where {T <: Turing.Inference.Transition, T3 <: Real}
+    update_kernel(rng::TRNG, state::AMGSDAState, trans::T, spl::Sampler{<:AMGS_DA_Sampler}, prob::T3) where {T <: Turing.Inference.Transition, T3 <: Real, TRNG <: AbstractRNG}
 
 Update the kernel matrix, and internal quantities of the AMGSDA sampler state based on the new transition and acceptance probability.
 
@@ -161,7 +161,7 @@ Update the kernel matrix, and internal quantities of the AMGSDA sampler state ba
 - `spl::Sampler{<:AMGS_DA_Sampler}`: The AMGSDA sampler.
 - `prob::T3`: The acceptance probability.
 """
-function update_kernel(state::AMGSDAState, trans::T, spl::Sampler{<:AMGS_DA_Sampler}, prob::T3) where {T <: Turing.Inference.Transition, T3 <: Real}
+function update_kernel(rng::TRNG, state::AMGSDAState, trans::T, spl::Sampler{<:AMGS_DA_Sampler}, prob::T3) where {T <: Turing.Inference.Transition, T3 <: Real, TRNG <: AbstractRNG}
     μ    = state.μ
     step = state.step
     state.Δ_cache .= state.varinfo[:]
@@ -192,7 +192,7 @@ function update_kernel(state::AMGSDAState, trans::T, spl::Sampler{<:AMGS_DA_Samp
         end
 
         # Optional noise stabilisation (fast Val dispatch)
-        @inline _add_noise!(state.kernel, spl.alg.noise_scaling, n, spl.alg.use_noise_stabiliser)
+        @inline _add_noise!(rng, state.kernel, spl.alg.noise_scaling, n, spl.alg.use_noise_stabiliser)
 
         ## Dual averaging step
         Ht = spl.alg.acceptance_rate - prob
@@ -200,7 +200,7 @@ function update_kernel(state::AMGSDAState, trans::T, spl::Sampler{<:AMGS_DA_Samp
         x = spl.alg.μ - ((sqrt(step) / spl.alg.γ) * ḡ)
         x̄ = step^(-spl.alg.κ) * x + (1 - step^(-spl.alg.κ)) * state.x̄
     end
-    return state.kernel, AMGSDAState(trans, state.varinfo, μ, state.kernel, step + 1, x, state.logjoint_internal, state.Δ_cache, x̄, ḡ)
+    return state.kernel, AMGSDAState(trans, state.varinfo, μ, state.kernel, step + 1, x̄, state.logjoint_internal, state.Δ_cache, x̄, ḡ)
 end
 
 # Function to set the new parameters (for use with gibbs sampler)
@@ -411,7 +411,7 @@ function AbstractMCMC.step(
 
     # Update the kernel and return the new transition and state
     prob = exp(min(0.0, (lp_proposal - lp_old)))
-    _, upd_state = update_kernel(accep ? proposal_state : orig_state, new_trans, spl, prob)
+    _, upd_state = update_kernel(rng, accep ? proposal_state : orig_state, new_trans, spl, prob)
     
     return new_trans, upd_state
 end
@@ -449,7 +449,7 @@ function AbstractMCMC.step(
 
     # Update the kernel and return the new transition and state
     prob = exp(min(0.0, (lp_proposal - lp_old)))
-    _, new_state = update_kernel(accep ? proposal_state : state, new_trans, spl, prob)
+    _, new_state = update_kernel(rng, accep ? proposal_state : state, new_trans, spl, prob)
     return new_trans, new_state
 end
 
