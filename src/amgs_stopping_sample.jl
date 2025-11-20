@@ -518,7 +518,7 @@ function AbstractMCMC.step(
     prob = exp(min(0.0, (lp_proposal - lp_old)))
     
     if (upd_state.step % spl.alg.average_interval) == 0
-        _, upd_state = update_kernel(rng, upd_state, new_trans, spl, prob)
+        upd_state = update_kernel(rng, upd_state, new_trans, spl, prob)
     end
 
     return new_trans, upd_state
@@ -572,7 +572,7 @@ function AbstractMCMC.step(
     
     # Update the kernel and return the new transition and state
     prob = exp(min(0.0, (lp_proposal - lp_old)))
-    _, new_state = update_kernel(rng, new_state, new_trans, spl, prob)
+    new_state = update_kernel(rng, new_state, new_trans, spl, prob)
     return new_trans, new_state
 end
 
