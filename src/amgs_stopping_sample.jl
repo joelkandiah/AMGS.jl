@@ -180,9 +180,24 @@ function update_kernel(rng::TRNG, state::AMGSStoppingState, trans::T, spl::Sampl
     Δ = state.varinfo[:] - μ
     μ = (1.0 - η) * μ + (η * state.varinfo[:])
     
+    # Optimized: Use BLAS for symmetric rank-1 update
+    Σ = (1.0 - η) * Σ
+    BLAS.syr!('U', η, Δ, Σ)
+    # Copy upper triangle to lower triangle for symmetry
+    n = length(Δ)
+    @inbounds for j in 1:n
+        for i in (j+1):n
+            Σ[i,j] = Σ[j,i]
+        end
+    end
+    
     # Add noise to the kernel if requested
-    noise_term = spl.alg.use_noise_stabiliser * spl.alg.noise_scaling * η * rand(rng, size(Δ)[1])
-    Σ = (1.0 - η) * Σ + (η * (Δ * (Δ'))) + diagm(noise_term)
+    if spl.alg.use_noise_stabiliser != 0
+        noise_term = spl.alg.noise_scaling * η * rand(rng, n)
+        @inbounds for i in 1:n
+            Σ[i,i] += noise_term[i]
+        end
+    end
     
     # Reset the running covariance and mean calculation
     new_state = AMGSStoppingState(trans, state.varinfo, μ, Σ, step + 1, β, state.Δi, state.stopped, state.logjoint_internal, 0.0, zero(μ), zero(Σ))

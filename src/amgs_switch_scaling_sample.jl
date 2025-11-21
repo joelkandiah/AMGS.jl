@@ -220,11 +220,15 @@ function update_kernel(rng::TRNG, state::AMGSSGSState, trans::T, spl::Sampler{<:
         @. state.Δ_cache -= μ
 
         # Outer product update, symmetric and in-place:
-        @inbounds for i in 1:n
-            Δi = state.Δ_cache[i]
-            for j in i:n
-                state.kernel[i,j] += η * (Δi * state.Δ_cache[j] - state.kernel[i,j])
-                state.kernel[j,i] = state.kernel[i,j]  # preserve symmetry
+        # Optimized: Use BLAS symmetric rank-1 update for outer product
+        # First scale kernel by (1-η)
+        state.kernel .*= (1.0 - η)
+        # Then add η*Δ*Δᵀ using symmetric rank-1 update
+        BLAS.syr!('U', η, state.Δ_cache, state.kernel)
+        # Copy upper triangle to lower triangle for symmetry
+        @inbounds for j in 1:n
+            for i in (j+1):n
+                state.kernel[i,j] = state.kernel[j,i]
             end
         end
 

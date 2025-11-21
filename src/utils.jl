@@ -48,7 +48,12 @@ Draw a Multivariate Normal proposal centered at `θ` with covariance `Σ`.
 - A vector containing the proposed parameters.
 """
 function proposewalk(rng::Random.AbstractRNG, θ::AbstractVector, Σ::AbstractMatrix)
-    return rand(rng, MvNormal(eltype(Σ).(θ), Σ))
+    # Optimized: use direct Cholesky sampling instead of MvNormal constructor
+    # This avoids allocating a new distribution object on every call
+    n = length(θ)
+    z = randn(rng, n)
+    L = cholesky(Symmetric(Σ)).L
+    return θ .+ L * z
 end
 
 # Define a function which proposes a new set of parameters
@@ -68,7 +73,8 @@ RAM-style proposal: sample a standard normal `U` and return `(θ + S*U, U)`.
   for reversible jump / RAM adjustments.
 """
 function proposewalkram(rng::Random.AbstractRNG, θ::AbstractVector, S::LowerTriangular)
-    U = rand(rng, MvNormal(zeros(length(θ)), LinearAlgebra.I))
+    # Optimized: avoid allocating zeros vector and use randn directly
+    U = randn(rng, length(θ))
     return θ + S * U, U
 end
 
