@@ -195,15 +195,13 @@ function update_kernel(rng::TRNG, state::AMGSStoppingTemperedState, trans::T, sp
         @. Δ -= μ
 
         # Outer product update, symmetric and in-place:
-        # Optimized: Use BLAS symmetric rank-1 update for outer product
-        # First scale kernel by (1-η)
-        state.kernel .*= (1.0 - η)
-        # Then add η*Δ*Δᵀ using symmetric rank-1 update
-        BLAS.syr!('U', η, Δ, state.kernel)
-        # Copy upper triangle to lower triangle for symmetry
-        @inbounds for j in 1:n
-            for i in (j+1):n
-                state.kernel[i,j] = state.kernel[j,i]
+        @inbounds for i in 1:n
+            Δi = Δ[i]
+            for j in i:n
+                #ΔΔ = Δ[i] * Δ[j]
+                #Σ_ij = state.kernel[i,j]
+                state.kernel[i,j] += η * (Δi * Δ[j] - state.kernel[i,j])
+                state.kernel[j,i] = state.kernel[i,j]  # preserve symmetry
             end
         end
 

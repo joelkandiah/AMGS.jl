@@ -42,7 +42,6 @@ using AbstractMCMC
 using Random
 using DynamicPPL
 using LinearAlgebra
-using LinearAlgebra: BLAS
 using BangBang
 using Accessors
 using MCMCChains
