@@ -56,6 +56,14 @@ function proposewalk(rng::Random.AbstractRNG, θ::AbstractVector, Σ::AbstractMa
     return θ .+ L * z
 end
 
+# Overload for pre-factorized covariance (for caching scenarios)
+function proposewalk(rng::Random.AbstractRNG, θ::AbstractVector, L::LowerTriangular)
+    # When Cholesky factorization is pre-computed and cached
+    n = length(θ)
+    z = randn(rng, n)
+    return θ .+ L * z
+end
+
 # Define a function which proposes a new set of parameters
 """
     proposewalkram(rng, θ, S)
