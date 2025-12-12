@@ -341,14 +341,14 @@ end
 
 # Write a function which proposes a new set of parameters
 """
-    propose_amgs(rng::AbstractRNG, vi::AbstractVarInfo, model::AbstractMCMC.AbstractModel, spl::AMGS_Stopping_Tempered_Sampler, Σ::AbstractMatrix)
+    propose_amgs(rng::AbstractRNG, vi::AbstractVarInfo, model::DynamicPPL.Model, spl::AMGS_Stopping_Tempered_Sampler, Σ::AbstractMatrix)
 
 Propose a new set of parameters for the AMGS Tempered sampler.
 
 # Arguments
 - `rng::AbstractRNG`: The random number generator.
 - `vi::AbstractVarInfo`: The variable information.
-- `model::AbstractMCMC.AbstractModel`: The model.
+- `model::DynamicPPL.Model`: The model.
 - `spl::AMGS_Stopping_Tempered_Sampler`: The AMGS sampler.
 - `state::AMGSStoppingTemperedState`: The current state of the sampler.
 - `Σ::AbstractMatrix`: The covariance matrix for the proposal.
@@ -356,7 +356,7 @@ Propose a new set of parameters for the AMGS Tempered sampler.
 function propose_amgs(
     rng::AbstractRNG,
     vi::AbstractVarInfo,
-    model::AbstractMCMC.AbstractModel,
+    model::DynamicPPL.Model,
     spl::AMGS_Stopping_Tempered_Sampler,
     state::AMGSStoppingTemperedState,
     Σ::AbstractMatrix
@@ -373,20 +373,20 @@ function propose_amgs(
 end
 
 """
-    AbstractMCMC.step_warmup(rng::AbstractRNG, model::AbstractMCMC.AbstractModel, spl::AMGS_Stopping_Tempered_Sampler; initial_params=nothing, kwargs...)
+    AbstractMCMC.step_warmup(rng::AbstractRNG, model::DynamicPPL.Model, spl::AMGS_Stopping_Tempered_Sampler; initial_params=nothing, kwargs...)
 
 Perform an initial warmup step for the AMGS Tempered sampler.
 
 # Arguments
 - `rng::AbstractRNG`: The random number generator.
-- `model::AbstractMCMC.AbstractModel`: The model.
+- `model::DynamicPPL.Model`: The model.
 - `spl::AMGS_Stopping_Tempered_Sampler`: The AMGS sampler.
 - `initial_params`: The initial parameters (optional).
 - `kwargs...`: Additional keyword arguments.
 """
 function AbstractMCMC.step_warmup(
     rng::AbstractRNG,
-    model::AbstractMCMC.AbstractModel,
+    model::DynamicPPL.Model,
     spl::AMGS_Stopping_Tempered_Sampler;
     initial_params=Turing.Inference.init_strategy(spl),
     kwargs...,
@@ -434,20 +434,20 @@ function AbstractMCMC.step_warmup(
 end
 
 """
-    AbstractMCMC.step_warmup(rng::AbstractRNG, model::AbstractMCMC.AbstractModel, spl::AMGS_Stopping_Tempered_Sampler, state::AMGSState; initial_params=nothing, kwargs...)
+    AbstractMCMC.step_warmup(rng::AbstractRNG, model::DynamicPPL.Model, spl::AMGS_Stopping_Tempered_Sampler, state::AMGSState; initial_params=nothing, kwargs...)
 
 Perform a warmup step for the AMGS Tempered sampler for a given state.
 
 # Arguments
 - `rng::AbstractRNG`: The random number generator.
-- `model::AbstractMCMC.AbstractModel`: The model.
+- `model::DynamicPPL.Model`: The model.
 - `spl::AMGS_Stopping_Tempered_Sampler`: The AMGS sampler.
 - `state::AMGSStoppingTemperedState`: The current state of the sampler.
 - `kwargs...`: Additional keyword arguments.
 """
 function AbstractMCMC.step_warmup(
     rng::AbstractRNG,
-    model::AbstractMCMC.AbstractModel,
+    model::DynamicPPL.Model,
     spl::AMGS_Stopping_Tempered_Sampler,
     state::AMGSStoppingTemperedState;
     kwargs...
@@ -559,7 +559,7 @@ Perform a sampling step for the AMGS Tempered sampler given a state.
 """
 function AbstractMCMC.step(
     rng::AbstractRNG,
-    model::AbstractMCMC.AbstractModel,
+    model::DynamicPPL.Model,
     spl::AMGS_Stopping_Tempered_Sampler,
     state::AMGSStoppingTemperedState;
     kwargs...
@@ -617,13 +617,13 @@ Get the log evidence from a collection of transitions. For AMGS samplers, this r
 getlogevidence(transitions, sampler::AMGS_Stopping_Tempered_Sampler, state) = missing
 
 """
-    AbstractMCMC.bundle_samples(ts::Vector{<:Turing.Inference.Transition}, model::AbstractMCMC.AbstractModel, spl::AMGS_Stopping_Tempered_Sampler, state, chain_type::Type{MCMCChains.Chains}; save_state=false, stats=missing, sort_chain=false, include_varname_to_symbol=true, discard_initial=0, thinning=1, kwargs...)
+    AbstractMCMC.bundle_samples(ts::Vector{<:Turing.Inference.Transition}, model::DynamicPPL.Model, spl::AMGS_Stopping_Tempered_Sampler, state, chain_type::Type{MCMCChains.Chains}; save_state=false, stats=missing, sort_chain=false, include_varname_to_symbol=true, discard_initial=0, thinning=1, kwargs...)
 
 Bundle the samples from the AMGS Tempered sampler into an MCMCChains Chain.
 
 # Arguments
 - `ts::Vector{<:Turing.Inference.Transition}`: The Vector of transitions.
-- `model::AbstractMCMC.AbstractModel`: The model.
+- `model::DynamicPPL.Model`: The model.
 - `spl::AMGS_Stopping_Tempered_Sampler`: The AMGS sampler.
 - `state`: The current state of the sampler.
 - `chain_type::Type{MCMCChains.Chains}`: The type of chain.
@@ -637,7 +637,7 @@ Bundle the samples from the AMGS Tempered sampler into an MCMCChains Chain.
 """
 function AbstractMCMC.bundle_samples(
     ts::Vector{<:Turing.Inference.Transition},
-    model::AbstractMCMC.AbstractModel,
+    model::DynamicPPL.Model,
     spl::AMGS_Stopping_Tempered_Sampler,
     state,
     chain_type::Type{MCMCChains.Chains};

@@ -264,21 +264,21 @@ end
 
 # Write a function which proposes a new set of parameters
 """
-    propose_BayesAMGSLL(rng::T_rng, vi::AbstractVarInfo, model::AbstractMCMC.AbstractModel, spl::Bayes_AMGS_Sampler, S::T) where {T_rng <: AbstractRNG, T <: AbstractMatrix}
+    propose_BayesAMGSLL(rng::T_rng, vi::AbstractVarInfo, model::DynamicPPL.Model, spl::Bayes_AMGS_Sampler, S::T) where {T_rng <: AbstractRNG, T <: AbstractMatrix}
 
 Propose a new set of parameters for the Bayes AMGS sampler.
 
 # Arguments
 - `rng::T_rng`: The random number generator.
 - `vi::AbstractVarInfo`: The variable information.
-- `model::AbstractMCMC.AbstractModel`: The model.
+- `model::DynamicPPL.Model`: The model.
 - `spl::Bayes_AMGS_Sampler`: The Bayes AMGS sampler.
 - `S::T`: The covariance matrix for the proposal.
 """
 function propose_BayesAMGSLL(
     rng::T_rng,
     vi::AbstractVarInfo,
-    model::AbstractMCMC.AbstractModel,
+    model::DynamicPPL.Model,
     spl::Bayes_AMGS_Sampler,
     state::BayesAMGSState,
     S::T
@@ -296,27 +296,27 @@ end
 
 # Write a function which initialises the chain where there are warmup steps
 """
-    AbstractMCMC.step_warmup(rng::AbstractRNG, model::AbstractMCMC.AbstractModel, spl::Bayes_AMGS_Sampler; initial_params=nothing, kwargs...)
+    AbstractMCMC.step_warmup(rng::AbstractRNG, model::DynamicPPL.Model, spl::Bayes_AMGS_Sampler; initial_params=nothing, kwargs...)
 
 Perform an initial warmup step for the Bayes AMGS sampler.
 
 # Arguments
 - `rng::AbstractRNG`: The random number generator.
-- `model::AbstractMCMC.AbstractModel`: The model.
+- `model::DynamicPPL.Model`: The model.
 - `spl::Bayes_AMGS_Sampler`: The Bayes AMGS sampler.
 - `initial_params`: The initial parameters (optional).
 - `kwargs...`: Additional keyword arguments.
 """
 function AbstractMCMC.step_warmup(
     rng::AbstractRNG,
-    model::AbstractMCMC.AbstractModel,
+    model::DynamicPPL.Model,
     spl::Bayes_AMGS_Sampler;
     initial_params = Turing.Inference.init_strategy(spl),
     kwargs...,
 )
 
-    varinfo = DynamicPPL.VarInfo(model)
-    _, varinfo = DynamicPPL.init!!(rng, model, varinfo, initial_params)
+    vis = DynamicPPL.VarInfo(model)
+    _, vis = DynamicPPL.init!!(rng, model, vis, initial_params)
     # If we're doing random walk with a covariance matrix,
     # just link everything before sampling.
     # vis = DynamicPPL.default_varinfo(rng, model, spl)
@@ -360,20 +360,20 @@ function AbstractMCMC.step_warmup(
 end
 
 """
-    AbstractMCMC.step_warmup(rng::AbstractRNG, model::AbstractMCMC.AbstractModel, spl::Bayes_AMGS_Sampler, state::BayesAMGSState; initial_params=nothing, kwargs...)
+    AbstractMCMC.step_warmup(rng::AbstractRNG, model::DynamicPPL.Model, spl::Bayes_AMGS_Sampler, state::BayesAMGSState; initial_params=nothing, kwargs...)
 
 Perform a warmup step for the Bayes AMGS sampler for a given state.
 
 # Arguments
 - `rng::AbstractRNG`: The random number generator.
-- `model::AbstractMCMC.AbstractModel`: The model.
+- `model::DynamicPPL.Model`: The model.
 - `spl::Bayes_AMGS_Sampler`: The Bayes AMGS sampler.
 - `state::BayesAMGSState`: The current state of the sampler.
 - `kwargs...`: Additional keyword arguments.
 """
 function AbstractMCMC.step_warmup(
     rng::AbstractRNG,
-    model::AbstractMCMC.AbstractModel,
+    model::DynamicPPL.Model,
     spl::Bayes_AMGS_Sampler,
     state::BayesAMGSState;
     kwargs...
@@ -422,8 +422,8 @@ function AbstractMCMC.step(
     initial_params = Turing.Inference.init_strategy(spl),
     kwargs...,
 )
-    varinfo = DynamicPPL.VarInfo(model)
-    _, varinfo = DynamicPPL.init!!(rng, model, varinfo, initial_params)
+    vis = DynamicPPL.VarInfo(model)
+    _, vis = DynamicPPL.init!!(rng, model, vis, initial_params)
     # vis = DynamicPPL.default_varinfo(rng, model, spl)
 
     # # If there are initial parameters, set them and the logdensity
@@ -466,20 +466,20 @@ function AbstractMCMC.step(
 end
 
 """
-    AbstractMCMC.step(rng::AbstractRNG, model::AbstractMCMC.AbstractModel, spl::Bayes_AMGS_Sampler, state::BayesAMGSState; initial_params=nothing, kwargs...)
+    AbstractMCMC.step(rng::AbstractRNG, model::DynamicPPL.Model, spl::Bayes_AMGS_Sampler, state::BayesAMGSState; initial_params=nothing, kwargs...)
 
 Perform a sampling step for the Bayes AMGS sampler for a given state.
 
 # Arguments
 - `rng::AbstractRNG`: The random number generator.
-- `model::AbstractMCMC.AbstractModel`: The model.
+- `model::DynamicPPL.Model`: The model.
 - `spl::Bayes_AMGS_Sampler`: The Bayes AMGS sampler.
 - `state::BayesAMGSState`: The current state of the sampler.
 - `kwargs...`: Additional keyword arguments.
 """
 function AbstractMCMC.step(
     rng::AbstractRNG,
-    model::AbstractMCMC.AbstractModel,
+    model::DynamicPPL.Model,
     spl::Bayes_AMGS_Sampler,
     state::BayesAMGSState;
     kwargs...,
@@ -510,13 +510,13 @@ end
 getlogevidence(transitions, sampler::Bayes_AMGS_Sampler, state) = missing
 
 """
-    AbstractMCMC.bundle_samples(ts::Vector{<:Turing.Inference.Transition}, model::AbstractMCMC.AbstractModel, spl::Bayes_AMGS_Sampler, state, chain_type::Type{MCMCChains.Chains}; save_state=false, stats=missing, sort_chain=false, include_varname_to_symbol=true, discard_initial=0, thinning=1, kwargs...)
+    AbstractMCMC.bundle_samples(ts::Vector{<:Turing.Inference.Transition}, model::DynamicPPL.Model, spl::Bayes_AMGS_Sampler, state, chain_type::Type{MCMCChains.Chains}; save_state=false, stats=missing, sort_chain=false, include_varname_to_symbol=true, discard_initial=0, thinning=1, kwargs...)
 
 Bundle the samples from the Bayes AMGS sampler into a chain.
 
 # Arguments
 - `ts::Vector{<:Turing.Inference.Transition}`: The Vector of transitions.
-- `model::AbstractMCMC.AbstractModel`: The model.
+- `model::DynamicPPL.Model`: The model.
 - `spl::Bayes_AMGS_Sampler`: The Bayes AMGS sampler.
 - `state`: The current state of the sampler.
 - `chain_type::Type{MCMCChains.Chains}`: The chain type.
@@ -530,7 +530,7 @@ Bundle the samples from the Bayes AMGS sampler into a chain.
 """
 function AbstractMCMC.bundle_samples(
     ts::Vector{<:Turing.Inference.Transition},
-    model::AbstractMCMC.AbstractModel,
+    model::DynamicPPL.Model,
     spl::Bayes_AMGS_Sampler,
     state,
     chain_type::Type{MCMCChains.Chains};

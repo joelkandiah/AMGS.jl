@@ -161,21 +161,21 @@ end
 
 # Write a function which proposes a new set of parameters
 """
-    propose_RAM(rng::T_rng, vi::AbstractVarInfo, model::AbstractMCMC.AbstractModel, spl::RAM_Sampler, S::T) where {T_rng <: AbstractRNG, T <: Cholesky}
+    propose_RAM(rng::T_rng, vi::AbstractVarInfo, model::DynamicPPL.Model, spl::RAM_Sampler, S::T) where {T_rng <: AbstractRNG, T <: Cholesky}
 
 Propose a new set of parameters for the RAM sampler.
 
 # Arguments
 - `rng::T_rng`: The random number generator.
 - `vi::AbstractVarInfo`: The variable information.
-- `model::AbstractMCMC.AbstractModel`: The model.
+- `model::DynamicPPL.Model`: The model.
 - `spl::RAM_Sampler`: The RAM sampler.
 - `S::T`: The Cholesky decomposition of the covariance matrix.
 """
 function propose_RAM(
     rng::T_rng,
     vi::AbstractVarInfo,
-    model::AbstractMCMC.AbstractModel,
+    model::DynamicPPL.Model,
     spl::RAM_Sampler,
     state::RAMState,
     S::T
@@ -194,20 +194,20 @@ end
 
 # Write a function which initialises the chain where there are warmup steps
 """
-    AbstractMCMC.step_warmup(rng::AbstractRNG, model::AbstractMCMC.AbstractModel, spl::RAM_Sampler; initial_params=nothing, kwargs...)
+    AbstractMCMC.step_warmup(rng::AbstractRNG, model::DynamicPPL.Model, spl::RAM_Sampler; initial_params=nothing, kwargs...)
 
 Perform an initial warmup step for the RAM sampler.
 
 # Arguments
 - `rng::AbstractRNG`: The random number generator.
-- `model::AbstractMCMC.AbstractModel`: The model.
+- `model::DynamicPPL.Model`: The model.
 - `spl::RAM_Sampler`: The RAM sampler.
 - `initial_params`: The initial parameters (optional).
 - `kwargs...`: Additional keyword arguments.
 """
 function AbstractMCMC.step_warmup(
     rng::AbstractRNG,
-    model::AbstractMCMC.AbstractModel,
+    model::DynamicPPL.Model,
     spl::RAM_Sampler;
     initial_params = Turing.Inference.init_strategy(spl),
     kwargs...,
@@ -253,20 +253,20 @@ function AbstractMCMC.step_warmup(
 end
 
 """
-    AbstractMCMC.step_warmup(rng::AbstractRNG, model::AbstractMCMC.AbstractModel, spl::RAM_Sampler, state::RAMState; initial_params=nothing, kwargs...)
+    AbstractMCMC.step_warmup(rng::AbstractRNG, model::DynamicPPL.Model, spl::RAM_Sampler, state::RAMState; initial_params=nothing, kwargs...)
 
 Perform a warmup step for the RAM sampler for a given state.
 
 # Arguments
 - `rng::AbstractRNG`: The random number generator.
-- `model::AbstractMCMC.AbstractModel`: The model.
+- `model::DynamicPPL.Model`: The model.
 - `spl::RAM_Sampler`: The RAM sampler.
 - `state::RAMState`: The current state of the sampler.
 - `kwargs...`: Additional keyword arguments.
 """
 function AbstractMCMC.step_warmup(
     rng::AbstractRNG,
-    model::AbstractMCMC.AbstractModel,
+    model::DynamicPPL.Model,
     spl::RAM_Sampler,
     state::RAMState;
     kwargs...
@@ -373,7 +373,7 @@ Perform a sampling step for the RAM sampler given a state.
 """
 function AbstractMCMC.step(
     rng::AbstractRNG,
-    model::AbstractMCMC.AbstractModel,
+    model::DynamicPPL.Model,
     spl::RAM_Sampler,
     state::RAMState;
     kwargs...,
@@ -410,13 +410,13 @@ end
 getlogevidence(transitions, sampler::RAM_Sampler, state) = missing
 
 """
-    AbstractMCMC.bundle_samples(ts::Vector{<:Turing.Inference.Transition}, model::AbstractMCMC.AbstractModel, spl::RAM_Sampler, state, chain_type::Type{MCMCChains.Chains}; save_state=false, stats=missing, sort_chain=false, include_varname_to_symbol=true, discard_initial=0, thinning=1, kwargs...)
+    AbstractMCMC.bundle_samples(ts::Vector{<:Turing.Inference.Transition}, model::DynamicPPL.Model, spl::RAM_Sampler, state, chain_type::Type{MCMCChains.Chains}; save_state=false, stats=missing, sort_chain=false, include_varname_to_symbol=true, discard_initial=0, thinning=1, kwargs...)
 
 Bundle the samples from the RAM sampler into an MCMCChains Chain.
 
 # Arguments
 - `ts::Vector{<:Turing.Inference.Transition}`: The Vector of transitions.
-- `model::AbstractMCMC.AbstractModel`: The model.
+- `model::DynamicPPL.Model`: The model.
 - `spl::RAM_Sampler`: The RAM sampler.
 - `state`: The current state of the sampler.
 - `chain_type::Type{MCMCChains.Chains}`: The type of chain.
@@ -430,7 +430,7 @@ Bundle the samples from the RAM sampler into an MCMCChains Chain.
 """
 function AbstractMCMC.bundle_samples(
     ts::Vector{<:Turing.Inference.Transition},
-    model::AbstractMCMC.AbstractModel,
+    model::DynamicPPL.Model,
     spl::RAM_Sampler,
     state,
     chain_type::Type{MCMCChains.Chains};
