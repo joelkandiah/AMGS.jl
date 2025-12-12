@@ -217,6 +217,33 @@ function _params_to_array(model::DynamicPPL.Model, ts::Vector)
     return names, vals
 end
 
+
+struct AMGSContext{R<:AbstractRNG} <: DynamicPPL.AbstractContext
+    rng::R
+end
+
+DynamicPPL.NodeTrait(::AMGSContext) = DynamicPPL.IsLeaf()
+
+function DynamicPPL.tilde_assume!!(
+    context::AMGSContext, right::Distribution, vn::VarName, vi::AbstractVarInfo
+)
+    # Allow MH to sample new variables from the prior if it's not already present in the
+    # VarInfo.
+    dispatch_ctx = if haskey(vi, vn)
+        DynamicPPL.DefaultContext()
+    else
+        DynamicPPL.InitContext(context.rng, DynamicPPL.InitFromPrior())
+    end
+    return DynamicPPL.tilde_assume!!(dispatch_ctx, right, vn, vi)
+end
+
+function DynamicPPL.tilde_observe!!(
+    ::AMGSContext, right::Distribution, left, vn::Union{VarName,Nothing}, vi::AbstractVarInfo
+)
+    return DynamicPPL.tilde_observe!!(DefaultContext(), right, left, vn, vi)
+end
+
+
 # function _params_to_array(model::DynamicPPL.Model, ts::Vector)
 #     names_set = OrderedSet{VarName}()
 #     # Extract the parameter names and values from each transition.

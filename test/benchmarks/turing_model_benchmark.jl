@@ -17,6 +17,7 @@ using Random
 using LinearAlgebra
 using Statistics
 using Printf
+using DynamicPPL
 
 println("="^80)
 println("AMGS Turing Model Performance Benchmark")
@@ -64,7 +65,6 @@ function create_regression_model(dim::Int)
     y = X * β_true + 0.5 * randn(n_obs)
     return regression_test(y, X, dim)
 end
-
 # ==============================================================================
 # Benchmark helper function
 # ==============================================================================
@@ -76,7 +76,7 @@ function benchmark_amgs_sampler(model, dim::Int;
     
     # Create the AMGS sampler
     myamgs = AMGS.AMGS_Sampler(0.234, 0.6)
-    spl = DynamicPPL.Sampler(myamgs)
+    spl = myamgs
     
     times = Float64[]
     n_params_sampled = 0

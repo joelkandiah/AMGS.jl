@@ -72,7 +72,7 @@ include("amgs_tempered_stopping_sample.jl")
 include("amgs_DA_sample.jl")
 include("amgs_switch_scaling_sample.jl")
 #include("pre-release/dr_amgs_sample.jl")
-include("pre-release/new_amgs_sample.jl")
+#include("pre-release/new_amgs_sample.jl")
 include("ram_sample.jl")
 include("bayes_amgs_sample.jl")
 
