@@ -30,9 +30,7 @@ samplers = Dict(
     "AMGS_Noise" => AMGS.AMGS_Sampler(0.234, 0.6, true, 1e-6),
     "Tempered" => AMGS.AMGS_Tempered_Sampler(0.234, 0.6, Val(false), 1e-6, 0.1),
     "Stopping_Tempered" => AMGS.AMGS_Stopping_Tempered_Sampler(
-        0.234, 0.6, 10000, 0.22, 0.24, 200;
-        use_noise_stabiliser = true, noise_scaling = 1e-6, temperature = 1.0
-    ),
+    0.234, 0.6, Val(true), 1e-6, 1.0, 0.22, 0.24, 200, 100000),
     "RAM" => AMGS.RAM_Sampler(0.234, 0.6),
     "Bayes_AMGS" => AMGS.Bayes_AMGS_Sampler(0.234, 100, 1, x -> Int(floor(0.5 * sqrt(2 * x)))),
     "Bayes_AMGS_Noise" => AMGS.Bayes_AMGS_Sampler(0.234, 100, 1, x -> Int(floor(0.5 * sqrt(2 * x))), true, 1e-5),
@@ -63,7 +61,7 @@ end
 # ----------------------------------------------------------
 # Run all benchmarks, 100 trials each
 # ----------------------------------------------------------
-outfile = "sampler_benchmarks_100_trials.txt"
+outfile = "sampler_benchmarks_100_trials_new.txt"
 
 open(outfile, "w") do io
     println(io, "Benchmark results generated: $(now())\n")

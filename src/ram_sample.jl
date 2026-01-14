@@ -41,14 +41,14 @@ State container used by the RAM (Robust Adaptive Metropolis) sampler to store ru
 required for adaptation using Cholesky-based proposals.
 
 # Fields
-- `transition`: the latest `Turing.Inference.Transition` object.
+- `transition`: the latest `DynamicPPL.ParamsWithStats` object.
 - `varinfo`: the `VarInfo` corresponding to the current parameter values.
 - `kernel`: Cholesky factor of the running covariance matrix used for proposals.
 - `step`: integer step counter for adaptation scheduling.
 - `logjoint_internal`: cached log joint density for the current state.
 """
 struct RAMState{
-    TTrans<:Turing.Inference.Transition,
+    TTrans<:DynamicPPL.ParamsWithStats,
     TVI<:AbstractVarInfo,
     TKernel<:Cholesky,
     TStep<:Integer,
@@ -75,7 +75,7 @@ function init_RAMState(
     transition::T_trans,
     varinfo::TVI,
     kernel::T_kernel,
-) where {T_trans <: Turing.Inference.Transition, TVI<:AbstractVarInfo, T_kernel <: Cholesky}
+) where {T_trans <: DynamicPPL.ParamsWithStats, TVI<:AbstractVarInfo, T_kernel <: Cholesky}
     # Initialize step
     step = 1
     # Initialize log joint density
@@ -85,18 +85,18 @@ end
 
 # Write a function which updates the kernel
 """
-    update_kernel(state::RAMState, trans::Turing.Inference.Transition, U::T, spl::RAM_Sampler, prob::T3) where {T <: Vector, T3 <: Real}
+    update_kernel(state::RAMState, trans::DynamicPPL.ParamsWithStats, U::T, spl::RAM_Sampler, prob::T3) where {T <: Vector, T3 <: Real}
 
 Update the kernel matrix of the RAM sampler state based on the new transition and acceptance probability.
 
 # Arguments
 - `state::RAMState`: The current state of the sampler.
-- `trans::Turing.Inference.Transition`: The new transition object.
+- `trans::DynamicPPL.ParamsWithStats`: The new transition object.
 - `U::T`: The proposed update vector.
 - `spl::RAM_Sampler`: The RAM sampler.
 - `prob::T3`: The acceptance probability.
 """
-function update_kernel(state::RAMState, trans::Turing.Inference.Transition, U::T, spl::RAM_Sampler, prob::T3) where {T <: Vector, T3 <: Real}
+function update_kernel(state::RAMState, trans::DynamicPPL.ParamsWithStats, U::T, spl::RAM_Sampler, prob::T3) where {T <: Vector, T3 <: Real}
     # Grab useful quantities from the state
     S = state.kernel
     step = state.step
@@ -151,7 +151,7 @@ function Turing.Inference.setparams_varinfo!!(
 
     lp = DynamicPPL.getlogjoint_internal(vi)
     # #update the model state
-    new_transition = Turing.Inference.Transition(model, vi, nothing)
+    new_transition = DynamicPPL.ParamsWithStats(vi, model)
     new_state = RAMState(new_transition, vi, state.kernel, state.step, lp)
     
     # Update the VarInfo with the new log density
@@ -230,7 +230,7 @@ function AbstractMCMC.step_warmup(
 
     # Get the log density of the current parameters
     lp_old = DynamicPPL.getlogjoint_internal(vis)
-    prev_transition = Turing.Inference.Transition(model, vis, nothing)
+    prev_transition = DynamicPPL.ParamsWithStats(vis, model)
 
     # Get the parameters of interest and create the covariance matrix
     theta = vis[:]
@@ -289,7 +289,7 @@ function AbstractMCMC.step_warmup(
     end
 
     # Create a new transition and state object if accepted
-    # trans = Turing.Inference.Transition(vis, lp_proposal, true)
+    # trans = DynamicPPL.ParamsWithStats(vis, lp_proposal, true)
     # new_state = RAMState(trans, S, state.step)
 
     return proposal_state.transition, proposal_state
@@ -333,7 +333,7 @@ function AbstractMCMC.step(
     lp_old = DynamicPPL.getlogjoint_internal(vis)
 
     # Create a transition object in case of rejection
-    prev_transition = Turing.Inference.Transition(model, vis, nothing)
+    prev_transition = DynamicPPL.ParamsWithStats(vis, model)
 
     # Get the parameters of interest and create the covariance matrix
     theta = vis[:]
@@ -410,12 +410,12 @@ end
 getlogevidence(transitions, sampler::RAM_Sampler, state) = missing
 
 """
-    AbstractMCMC.bundle_samples(ts::Vector{<:Turing.Inference.Transition}, model::DynamicPPL.Model, spl::RAM_Sampler, state, chain_type::Type{MCMCChains.Chains}; save_state=false, stats=missing, sort_chain=false, include_varname_to_symbol=true, discard_initial=0, thinning=1, kwargs...)
+    AbstractMCMC.bundle_samples(ts::Vector{<:DynamicPPL.ParamsWithStats}, model::DynamicPPL.Model, spl::RAM_Sampler, state, chain_type::Type{MCMCChains.Chains}; save_state=false, stats=missing, sort_chain=false, include_varname_to_symbol=true, discard_initial=0, thinning=1, kwargs...)
 
 Bundle the samples from the RAM sampler into an MCMCChains Chain.
 
 # Arguments
-- `ts::Vector{<:Turing.Inference.Transition}`: The Vector of transitions.
+- `ts::Vector{<:DynamicPPL.ParamsWithStats}`: The Vector of transitions.
 - `model::DynamicPPL.Model`: The model.
 - `spl::RAM_Sampler`: The RAM sampler.
 - `state`: The current state of the sampler.
@@ -428,64 +428,64 @@ Bundle the samples from the RAM sampler into an MCMCChains Chain.
 - `thinning`: The thinning interval (default: 1).
 - `kwargs...`: Additional keyword arguments.
 """
-function AbstractMCMC.bundle_samples(
-    ts::Vector{<:Turing.Inference.Transition},
-    model::DynamicPPL.Model,
-    spl::RAM_Sampler,
-    state,
-    chain_type::Type{MCMCChains.Chains};
-    save_state=false,
-    stats=missing,
-    sort_chain=false,
-    include_varname_to_symbol=true,
-    discard_initial=0,
-    thinning=1,
-    kwargs...,
-)
-    # Convert transitions to array format.
-    # Also retrieve the variable names.
-    varnames, vals = _params_to_array(model, ts)
-    varnames_symbol = map(Symbol, varnames)
-
-    # Get the values of the extra parameters in each transition.
-    extra_params, extra_values = Turing.Inference.get_transition_extras(ts)
-
-    # Extract names & construct param array.
-    nms = [varnames_symbol; extra_params]
-    parray = hcat(vals, extra_values)
-
-    # Get the average or final log evidence, if it exists.
-    le = getlogevidence(ts, spl, state)
-
-    # Set up the info tuple.
-    info = NamedTuple()
-
-    if include_varname_to_symbol
-        info = merge(info, (varname_to_symbol=OrderedDict(zip(varnames, varnames_symbol)),))
-    end
-
-    if save_state
-        info = merge(info, (model=model, sampler=spl, samplerstate=state))
-    end
-
-    # Merge in the timing info, if available
-    if !ismissing(stats)
-        info = merge(info, (start_time=stats.start, stop_time=stats.stop))
-    end
-
-    # Conretize the array before giving it to MCMCChains.
-    parray = MCMCChains.concretize(parray)
-
-    # Chain construction.
-    chain = MCMCChains.Chains(
-        parray,
-        nms,
-        (internals=extra_params,);
-        evidence=le,
-        info=info,
-        start=discard_initial + 1,
-        thin=thinning,
-    )
-
-    return sort_chain ? sort(chain) : chain
-end
+# function AbstractMCMC.bundle_samples(
+#     ts::Vector{<:DynamicPPL.ParamsWithStats},
+#     model::DynamicPPL.Model,
+#     spl::RAM_Sampler,
+#     state,
+#     chain_type::Type{MCMCChains.Chains};
+#     save_state=false,
+#     stats=missing,
+#     sort_chain=false,
+#     include_varname_to_symbol=true,
+#     discard_initial=0,
+#     thinning=1,
+#     kwargs...,
+# )
+#     # Convert transitions to array format.
+#     # Also retrieve the variable names.
+#     varnames, vals = _params_to_array(model, ts)
+#     varnames_symbol = map(Symbol, varnames)
+# 
+#     # Get the values of the extra parameters in each transition.
+#     extra_params, extra_values = Turing.Inference.get_transition_extras(ts)
+# 
+#     # Extract names & construct param array.
+#     nms = [varnames_symbol; extra_params]
+#     parray = hcat(vals, extra_values)
+# 
+#     # Get the average or final log evidence, if it exists.
+#     le = getlogevidence(ts, spl, state)
+# 
+#     # Set up the info tuple.
+#     info = NamedTuple()
+# 
+#     if include_varname_to_symbol
+#         info = merge(info, (varname_to_symbol=OrderedDict(zip(varnames, varnames_symbol)),))
+#     end
+# 
+#     if save_state
+#         info = merge(info, (model=model, sampler=spl, samplerstate=state))
+#     end
+# 
+#     # Merge in the timing info, if available
+#     if !ismissing(stats)
+#         info = merge(info, (start_time=stats.start, stop_time=stats.stop))
+#     end
+# 
+#     # Conretize the array before giving it to MCMCChains.
+#     parray = MCMCChains.concretize(parray)
+# 
+#     # Chain construction.
+#     chain = MCMCChains.Chains(
+#         parray,
+#         nms,
+#         (internals=extra_params,);
+#         evidence=le,
+#         info=info,
+#         start=discard_initial + 1,
+#         thin=thinning,
+#     )
+# 
+#     return sort_chain ? sort(chain) : chain
+# end

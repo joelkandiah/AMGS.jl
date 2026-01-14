@@ -222,8 +222,6 @@ struct AMGSContext{R<:AbstractRNG} <: DynamicPPL.AbstractContext
     rng::R
 end
 
-DynamicPPL.NodeTrait(::AMGSContext) = DynamicPPL.IsLeaf()
-
 function DynamicPPL.tilde_assume!!(
     context::AMGSContext, right::Distribution, vn::VarName, vi::AbstractVarInfo
 )

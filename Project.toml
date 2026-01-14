@@ -20,6 +20,8 @@ Revise = "295af30f-e4ad-537b-8983-00126c2a3abe"
 Turing = "fce5fe82-541a-59a6-adf8-730c64b5f9a0"
 
 [compat]
+AbstractMCMC = "5.10.0"
 DataStructures = "0.18.20"
 LoopVectorization = "0.12.172"
 Revise = "3.9.0"
+Turing = "0.42.0"

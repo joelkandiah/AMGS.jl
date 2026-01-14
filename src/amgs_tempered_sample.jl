@@ -65,7 +65,7 @@ State container used by the AMGS Tempered sampler to store running statistics
 required for adaptation in tempered MCMC.
 
 # Fields
-- `transition`: the latest `Turing.Inference.Transition` object.
+- `transition`: the latest `DynamicPPL.ParamsWithStats` object.
 - `varinfo`: the `VarInfo` corresponding to the current parameter values.
 - `μ`: running mean vector of parameters.
 - `kernel`: running covariance (or scale) matrix used for proposals.
@@ -75,7 +75,7 @@ required for adaptation in tempered MCMC.
 - `logjoint_tempered`: cached tempered log joint density (includes temperature scaling).
 """
 struct AMGSTemperedState{
-    TTrans<:Turing.Inference.Transition,
+    TTrans<:DynamicPPL.ParamsWithStats,
     TVI<:AbstractVarInfo,
     Tμ<:AbstractVector,
     TKernel<:AbstractMatrix,
@@ -96,7 +96,7 @@ end
 
 # Define the initial state of the sampler
 """
-    init_AMGSTemperedState(transition::T_trans, μ::Vector{T_μ}, kernel::T_kernel) where {T_trans <: Turing.Inference.Transition, T_μ <: Real, T_kernel <: Matrix}
+    init_AMGSTemperedState(transition::T_trans, μ::Vector{T_μ}, kernel::T_kernel) where {T_trans <: DynamicPPL.ParamsWithStats, T_μ <: Real, T_kernel <: Matrix}
 
 Initialize the state of the AMGS Tempered sampler with the given transition, mean vector μ, and kernel matrix.
 
@@ -112,7 +112,7 @@ function init_AMGSTemperedState(
     μ::Vector{T_μ},
     kernel::T_kernel,
     temp::T_Temp,
-) where {T_trans <: Turing.Inference.Transition, TVI <: AbstractVarInfo, T_μ <: Real, T_kernel <: AbstractMatrix, T_Temp <: Real}
+) where {T_trans <: DynamicPPL.ParamsWithStats, TVI <: AbstractVarInfo, T_μ <: Real, T_kernel <: AbstractMatrix, T_Temp <: Real}
     ## copy vector length of mu and initialise zero vector for beta
     step = 1
     β = zero(eltype(μ))
@@ -122,7 +122,7 @@ function init_AMGSTemperedState(
 end
 
 """
-    init_AMGSTemperedState(transition::T_trans, μ::T_μ, kernel::T_kernel) where {T_trans <: Turing.Inference.Transition, T_μ <: Real, T_kernel <: AbstractMatrix}
+    init_AMGSTemperedState(transition::T_trans, μ::T_μ, kernel::T_kernel) where {T_trans <: DynamicPPL.ParamsWithStats, T_μ <: Real, T_kernel <: AbstractMatrix}
 
 Initialize the state of the AMGS Tempered sampler with the given transition, mean value μ, and kernel matrix for a 1D case.
 
@@ -138,7 +138,7 @@ function init_AMGSTemperedState(
     μ::T_μ,
     kernel::T_kernel,
     temp::T_Temp
-) where {T_trans <: Turing.Inference.Transition, TVI <: AbstractVarInfo, T_μ <: Real, T_kernel <: AbstractMatrix, T_Temp <: Real}
+) where {T_trans <: DynamicPPL.ParamsWithStats, TVI <: AbstractVarInfo, T_μ <: Real, T_kernel <: AbstractMatrix, T_Temp <: Real}
     ## copy vector length of mu and initialise zero vector for beta
     step = 1
     β = zero(typeof(μ))
@@ -149,7 +149,7 @@ function init_AMGSTemperedState(
 end
 
 """
-    update_kernel(rng::TRNG, state::AMGSTemperedState, trans::T, spl::AMGS_Tempered_Sampler, prob::T3) where {T <: Turing.Inference.Transition, T3 <: Real, TRNG <: AbstractRNG}
+    update_kernel(rng::TRNG, state::AMGSTemperedState, trans::T, spl::AMGS_Tempered_Sampler, prob::T3) where {T <: DynamicPPL.ParamsWithStats, T3 <: Real, TRNG <: AbstractRNG}
 
 Update the kernel matrix, and internal quantities of the AMGS Tempered sampler state based on the new transition and acceptance probability.
 
@@ -159,7 +159,7 @@ Update the kernel matrix, and internal quantities of the AMGS Tempered sampler s
 - `spl::AMGS_Tempered_Sampler`: The AMGS sampler.
 - `prob::T3`: The acceptance probability.
 """
-function update_kernel(rng::TRNG, state::AMGSTemperedState, trans::T, spl::AMGS_Tempered_Sampler, prob::T3) where {T <: Turing.Inference.Transition, T3 <: Real, TRNG <: AbstractRNG}
+function update_kernel(rng::TRNG, state::AMGSTemperedState, trans::T, spl::AMGS_Tempered_Sampler, prob::T3) where {T <: DynamicPPL.ParamsWithStats, T3 <: Real, TRNG <: AbstractRNG}
     μ    = state.μ
     step = state.step
     Δ    = state.varinfo[:]
@@ -220,7 +220,7 @@ function Turing.Inference.setparams_varinfo!!(
     lp = DynamicPPL.getlogjoint_internal(vi)
     tempered_lp = sampler.temperature * (DynamicPPL.getlogprior(vi) + DynamicPPL.getloglikelihood(vi)) - DynamicPPL.getlogjac(vi)
     # update the model state
-    new_transition = Turing.Inference.Transition(model, vi, (; lp_tempered = tempered_lp, lp_internal = lp))
+    new_transition = DynamicPPL.ParamsWithStats(vi, model, (; lp_tempered = tempered_lp, lp_internal = lp))
     new_state = AMGSTemperedState(new_transition, vi, state.μ, state.kernel, state.step, state.β, lp, tempered_lp) 
     
     # Update the VarInfo with the new log density
@@ -297,7 +297,7 @@ function AbstractMCMC.step_warmup(
 
     # Get the log density of the current parameters
     lp_old = DynamicPPL.getlogjoint_internal(vis)
-    prev_transition = Turing.Inference.Transition(model, vis, (; lp_tempered = spl.temperature * (DynamicPPL.getlogprior(vis) + DynamicPPL.getloglikelihood(vis)) - DynamicPPL.getlogjac(vis), lp_internal = lp_old))
+    prev_transition = DynamicPPL.ParamsWithStats(vis, model, (; lp_tempered = spl.temperature * (DynamicPPL.getlogprior(vis) + DynamicPPL.getloglikelihood(vis)) - DynamicPPL.getlogjac(vis), lp_internal = lp_old))
 
     # Get the parameters of interest and create the covariance matrix
     theta = vis[:]
@@ -394,7 +394,7 @@ function AbstractMCMC.step(
     # lp_old = DynamicPPL.getlogjoint_internal(vis)
 
     # Create a transition object in case of rejection
-    prev_transition = Turing.Inference.Transition(model, vis, (;lp_tempered = spl.temperature * (DynamicPPL.getlogprior(vis) + DynamicPPL.getloglikelihood(vis)) - DynamicPPL.getlogjac(vis), lp_internal = DynamicPPL.getlogjoint_internal(vis)))
+    prev_transition = DynamicPPL.ParamsWithStats(vis, model, (;lp_tempered = spl.temperature * (DynamicPPL.getlogprior(vis) + DynamicPPL.getloglikelihood(vis)) - DynamicPPL.getlogjac(vis), lp_internal = DynamicPPL.getlogjoint_internal(vis)))
 
     # Get the parameters of interest and create the covariance matrix
     theta = vis[:]
@@ -472,12 +472,12 @@ end
 getlogevidence(transitions, sampler::AMGS_Tempered_Sampler, state) = missing
 
 """
-    AbstractMCMC.bundle_samples(ts::Vector{<:Turing.Inference.Transition}, model::DynamicPPL.Model, spl::AMGS_Tempered_Sampler, state, chain_type::Type{MCMCChains.Chains}; save_state=false, stats=missing, sort_chain=false, include_varname_to_symbol=true, discard_initial=0, thinning=1, kwargs...)
+    AbstractMCMC.bundle_samples(ts::Vector{<:DynamicPPL.ParamsWithStats}, model::DynamicPPL.Model, spl::AMGS_Tempered_Sampler, state, chain_type::Type{MCMCChains.Chains}; save_state=false, stats=missing, sort_chain=false, include_varname_to_symbol=true, discard_initial=0, thinning=1, kwargs...)
 
 Bundle the samples from the AMGS Tempered sampler into an MCMCChains Chain.
 
 # Arguments
-- `ts::Vector{<:Turing.Inference.Transition}`: The Vector of transitions.
+- `ts::Vector{<:DynamicPPL.ParamsWithStats}`: The Vector of transitions.
 - `model::DynamicPPL.Model`: The model.
 - `spl::AMGS_Tempered_Sampler`: The AMGS sampler.
 - `state`: The current state of the sampler.
@@ -490,110 +490,110 @@ Bundle the samples from the AMGS Tempered sampler into an MCMCChains Chain.
 - `thinning`: The thinning interval (default: 1).
 - `kwargs...`: Additional keyword arguments.
 """
-function AbstractMCMC.bundle_samples(
-    ts::Vector{<:Turing.Inference.Transition},
-    model::DynamicPPL.Model,
-    spl::AMGS_Tempered_Sampler,
-    state,
-    chain_type::Type{MCMCChains.Chains};
-    save_state=false,
-    stats=missing,
-    sort_chain=false,
-    include_varname_to_symbol=true,
-    discard_initial=0,
-    thinning=1,
-    kwargs...,
-)
-
-    # Convert transitions to array format.
-    # Also retrieve the variable names.
-    varnames, vals = _params_to_array(model, ts)
-    varnames_symbol = map(Symbol, varnames)
-
-    # Get the values of the extra parameters in each transition.
-    extra_params, extra_values = Turing.Inference.get_transition_extras(ts)
-
-    # Extract names & construct param array.
-    nms = [varnames_symbol; extra_params]
-    parray = hcat(vals, extra_values)
-
-    # Get the average or final log evidence, if it exists.
-    le = getlogevidence(ts, spl, state)
-
-    # Set up the info tuple.
-    info = NamedTuple()
-
-    if include_varname_to_symbol
-        info = merge(info, (varname_to_symbol=OrderedDict(zip(varnames, varnames_symbol)),))
-    end
-
-    if save_state
-        info = merge(info, (model=model, sampler=spl, samplerstate=state))
-    end
-
-    # Merge in the timing info, if available
-    if !ismissing(stats)
-        info = merge(info, (start_time=stats.start, stop_time=stats.stop))
-    end
-
-    # Conretize the array before giving it to MCMCChains.
-    parray = MCMCChains.concretize(parray)
-
-    # Chain construction.
-    chain = MCMCChains.Chains(
-        parray,
-        nms,
-        (internals=extra_params,);
-        evidence=le,
-        info=info,
-        start=discard_initial + 1,
-        thin=thinning,
-    )
-
-    return sort_chain ? sort(chain) : chain
-end
-
-# # Handle setting `nadapts` and `discard_initial`
-# function AbstractMCMC.sample(
-#     rng::AbstractRNG,
+# function AbstractMCMC.bundle_samples(
+#     ts::Vector{<:DynamicPPL.ParamsWithStats},
 #     model::DynamicPPL.Model,
-#     sampler::AMGS_Tempered_Sampler,
-#     N::Integer;
-#     chain_type=DynamicPPL.default_chain_type(sampler),
-#     resume_from=nothing,
-#     initial_state=DynamicPPL.loadstate(resume_from),
-#     progress=PROGRESS[],
-#     num_warmup = num_warmup,
-#     discard_initial = discard_initial,
+#     spl::AMGS_Tempered_Sampler,
+#     state,
+#     chain_type::Type{MCMCChains.Chains};
+#     save_state=false,
+#     stats=missing,
+#     sort_chain=false,
+#     include_varname_to_symbol=true,
+#     discard_initial=0,
+#     thinning=1,
 #     kwargs...,
 # )
-#     if resume_from === nothing
 # 
-#         # If `discard_initial` is `-1`, then users did not specify the keyword argument.
+#     # Convert transitions to array format.
+#     # Also retrieve the variable names.
+#     varnames, vals = _params_to_array(model, ts)
+#     varnames_symbol = map(Symbol, varnames)
 # 
-#         return AbstractMCMC.mcmcsample(
-#             rng,
-#             model,
-#             sampler,
-#             N;
-#             chain_type=chain_type,
-#             progress=progress,
-#             num_warmup = num_warmup,
-#             discard_initial = discard_initial,
-#             kwargs...,
-#         )
-#     else
-#         return AbstractMCMC.mcmcsample(
-#             rng,
-#             model,
-#             sampler,
-#             N;
-#             chain_type=chain_type,
-#             initial_state=initial_state,
-#             progress=progress,
-#             num_warmup = 0,
-#             discard_initial=0,
-#             kwargs...,
-#         )
+#     # Get the values of the extra parameters in each transition.
+#     extra_params, extra_values = Turing.Inference.get_transition_extras(ts)
+# 
+#     # Extract names & construct param array.
+#     nms = [varnames_symbol; extra_params]
+#     parray = hcat(vals, extra_values)
+# 
+#     # Get the average or final log evidence, if it exists.
+#     le = getlogevidence(ts, spl, state)
+# 
+#     # Set up the info tuple.
+#     info = NamedTuple()
+# 
+#     if include_varname_to_symbol
+#         info = merge(info, (varname_to_symbol=OrderedDict(zip(varnames, varnames_symbol)),))
 #     end
+# 
+#     if save_state
+#         info = merge(info, (model=model, sampler=spl, samplerstate=state))
+#     end
+# 
+#     # Merge in the timing info, if available
+#     if !ismissing(stats)
+#         info = merge(info, (start_time=stats.start, stop_time=stats.stop))
+#     end
+# 
+#     # Conretize the array before giving it to MCMCChains.
+#     parray = MCMCChains.concretize(parray)
+# 
+#     # Chain construction.
+#     chain = MCMCChains.Chains(
+#         parray,
+#         nms,
+#         (internals=extra_params,);
+#         evidence=le,
+#         info=info,
+#         start=discard_initial + 1,
+#         thin=thinning,
+#     )
+# 
+#     return sort_chain ? sort(chain) : chain
 # end
+# 
+# # # Handle setting `nadapts` and `discard_initial`
+# # function AbstractMCMC.sample(
+# #     rng::AbstractRNG,
+# #     model::DynamicPPL.Model,
+# #     sampler::AMGS_Tempered_Sampler,
+# #     N::Integer;
+# #     chain_type=DynamicPPL.default_chain_type(sampler),
+# #     resume_from=nothing,
+# #     initial_state=DynamicPPL.loadstate(resume_from),
+# #     progress=PROGRESS[],
+# #     num_warmup = num_warmup,
+# #     discard_initial = discard_initial,
+# #     kwargs...,
+# # )
+# #     if resume_from === nothing
+# # 
+# #         # If `discard_initial` is `-1`, then users did not specify the keyword argument.
+# # 
+# #         return AbstractMCMC.mcmcsample(
+# #             rng,
+# #             model,
+# #             sampler,
+# #             N;
+# #             chain_type=chain_type,
+# #             progress=progress,
+# #             num_warmup = num_warmup,
+# #             discard_initial = discard_initial,
+# #             kwargs...,
+# #         )
+# #     else
+# #         return AbstractMCMC.mcmcsample(
+# #             rng,
+# #             model,
+# #             sampler,
+# #             N;
+# #             chain_type=chain_type,
+# #             initial_state=initial_state,
+# #             progress=progress,
+# #             num_warmup = 0,
+# #             discard_initial=0,
+# #             kwargs...,
+# #         )
+# #     end
+# # end
