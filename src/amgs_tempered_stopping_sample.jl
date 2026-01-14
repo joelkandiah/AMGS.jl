@@ -33,7 +33,7 @@ chain = sample(model, sampler, 10000)  # May stop early when converged
 TODO: Add detailed explanation of stopping criteria and convergence detection.
 TODO: Explain the interaction between temperature and stopping conditions.
 """
-struct AMGS_Stopping_Tempered_Sampler{ T_accep <: Real, T_conv_step <: Real, T_scale <: Real, T_B, T_Temp <: Real} <: Turing.InferenceAlgorithm
+struct AMGS_Stopping_Tempered_Sampler{ T_accep <: Real, T_conv_step <: Real, T_scale <: Real, T_B, T_Temp <: Real} <: AbstractMCMC.AbstractSampler
     acceptance_rate::T_accep
     convergence_step::T_conv_step
     use_noise_stabiliser::Val{T_B}
@@ -62,7 +62,7 @@ return AMGS_Stopping_Tempered_Sampler(acceptance_rate, convergence_step, Val(use
 end
 
 
-DynamicPPL.default_chain_type(sampler::Sampler{<:AMGS_Stopping_Tempered_Sampler}) = MCMCChains.Chains
+# DynamicPPL.default_chain_type(sampler::AMGS_Stopping_Tempered_Sampler) = MCMCChains.Chains
 
 # Define the state of the sampler
 # Contains Important quantities for computation of the updated kernel
@@ -73,7 +73,7 @@ State container used by the AMGS Stopping Tempered sampler to store running stat
 required for adaptation and automatic stopping in tempered MCMC.
 
 # Fields
-- `transition`: the latest `Turing.Inference.Transition` object.
+- `transition`: the latest `DynamicPPL.ParamsWithStats` object.
 - `varinfo`: the `VarInfo` corresponding to the current parameter values.
 - `μ`: running mean vector of parameters.
 - `kernel`: running covariance (or scale) matrix used for proposals.
@@ -85,7 +85,7 @@ required for adaptation and automatic stopping in tempered MCMC.
 - `μ_running_avg`: running average of parameter means for convergence monitoring.
 """
 struct AMGSStoppingTemperedState{
-    TTrans<:Turing.Inference.Transition,
+    TTrans<:DynamicPPL.ParamsWithStats,
     TVI<:AbstractVarInfo,
     Tμ<:AbstractVector,
     TKernel<:AbstractMatrix,
@@ -112,7 +112,7 @@ end
 
 # Define the initial state of the sampler
 """
-    init_AMGSStoppingTemperedState(transition::T_trans, μ::Vector{T_μ}, kernel::T_kernel) where {T_trans <: Turing.Inference.Transition, T_μ <: Real, T_kernel <: Matrix}
+    init_AMGSStoppingTemperedState(transition::T_trans, μ::Vector{T_μ}, kernel::T_kernel) where {T_trans <: DynamicPPL.ParamsWithStats, T_μ <: Real, T_kernel <: Matrix}
 
 Initialize the state of the AMGS Tempered sampler with the given transition, mean vector μ, and kernel matrix.
 
@@ -128,7 +128,7 @@ function init_AMGSStoppingTemperedState(
     μ::Vector{T_μ},
     kernel::T_kernel,
     temp::T_Temp,
-) where {T_trans <: Turing.Inference.Transition, TVI <: AbstractVarInfo, T_μ <: Real, T_kernel <: AbstractMatrix, T_Temp <: Real}
+) where {T_trans <: DynamicPPL.ParamsWithStats, TVI <: AbstractVarInfo, T_μ <: Real, T_kernel <: AbstractMatrix, T_Temp <: Real}
     ## copy vector length of mu and initialise zero vector for beta
     step = 0
     β = zero(eltype(μ))
@@ -138,7 +138,7 @@ function init_AMGSStoppingTemperedState(
 end
 
 """
-    init_AMGSStoppingTemperedState(transition::T_trans, μ::T_μ, kernel::T_kernel) where {T_trans <: Turing.Inference.Transition, T_μ <: Real, T_kernel <: AbstractMatrix}
+    init_AMGSStoppingTemperedState(transition::T_trans, μ::T_μ, kernel::T_kernel) where {T_trans <: DynamicPPL.ParamsWithStats, T_μ <: Real, T_kernel <: AbstractMatrix}
 
 Initialize the state of the AMGS Tempered sampler with the given transition, mean value μ, and kernel matrix for a 1D case.
 
@@ -154,7 +154,7 @@ function init_AMGSStoppingTemperedState(
     μ::T_μ,
     kernel::T_kernel,
     temp::T_Temp
-) where {T_trans <: Turing.Inference.Transition, TVI <: AbstractVarInfo, T_μ <: Real, T_kernel <: AbstractMatrix, T_Temp <: Real}
+) where {T_trans <: DynamicPPL.ParamsWithStats, TVI <: AbstractVarInfo, T_μ <: Real, T_kernel <: AbstractMatrix, T_Temp <: Real}
     ## copy vector length of mu and initialise zero vector for beta
     step = 0
     β = zero(typeof(μ))
@@ -165,17 +165,17 @@ function init_AMGSStoppingTemperedState(
 end
 
 """
-    update_kernel(rng::TRNG, state::AMGSStoppingTemperedState, trans::T, spl::Sampler{<:AMGS_Stopping_Tempered_Sampler}, prob::T3) where {T <: Turing.Inference.Transition, T3 <: Real, TRNG <: AbstractRNG}
+    update_kernel(rng::TRNG, state::AMGSStoppingTemperedState, trans::T, spl::AMGS_Stopping_Tempered_Sampler, prob::T3) where {T <: DynamicPPL.ParamsWithStats, T3 <: Real, TRNG <: AbstractRNG}
 
 Update the kernel matrix, and internal quantities of the AMGS Tempered sampler state based on the new transition and acceptance probability.
 
 # Arguments
 - `state::AMGSStoppingTemperedState`: The current state of the sampler.
 - `trans::T`: The new transition object.
-- `spl::Sampler{<:AMGS_Stopping_Tempered_Sampler}`: The AMGS sampler.
+- `spl::AMGS_Stopping_Tempered_Sampler`: The AMGS sampler.
 - `prob::T3`: The acceptance probability.
 """
-function update_kernel(rng::TRNG, state::AMGSStoppingTemperedState, trans::T, spl::Sampler{<:AMGS_Stopping_Tempered_Sampler}, prob::T3) where {T <: Turing.Inference.Transition, T3 <: Real, TRNG <: AbstractRNG}
+function update_kernel(rng::TRNG, state::AMGSStoppingTemperedState, trans::T, spl::AMGS_Stopping_Tempered_Sampler, prob::T3) where {T <: DynamicPPL.ParamsWithStats, T3 <: Real, TRNG <: AbstractRNG}
     μ    = state.μ_running_avg
     step = state.step
     Δ    = state.varinfo[:]
@@ -183,10 +183,10 @@ function update_kernel(rng::TRNG, state::AMGSStoppingTemperedState, trans::T, sp
 
     # Robbins–Monro gain
     @fastmath begin
-        η = (step + 1.0)^(-spl.alg.convergence_step)
+        η = (step + 1.0)^(-spl.convergence_step)
 
         # Adapt acceptance-rate scaling
-        β = state.β + η * (prob - spl.alg.acceptance_rate)
+        β = state.β + η * (prob - spl.acceptance_rate)
 
         # Update running mean μ ← (1−η)μ + ηθ
         @. μ += η * (Δ - μ)
@@ -206,7 +206,7 @@ function update_kernel(rng::TRNG, state::AMGSStoppingTemperedState, trans::T, sp
         end
 
         # Optional noise stabilisation (fast Val dispatch)
-        @inline _add_noise!(rng, state.kernel, spl.alg.noise_scaling, n, spl.alg.use_noise_stabiliser)
+        @inline _add_noise!(rng, state.kernel, spl.noise_scaling, n, spl.use_noise_stabiliser)
     end 
 
     ## Reset the running covariance and mean calculation
@@ -214,7 +214,9 @@ function update_kernel(rng::TRNG, state::AMGSStoppingTemperedState, trans::T, sp
 end
 
 # Function to set the new parameters (for use with gibbs sampler)
-Turing.Inference.isgibbscomponent(::AMGS_Stopping_Tempered_Sampler) = true 
+Turing.Inference.isgibbscomponent(::AMGS_Stopping_Tempered_Sampler) = true
+
+Turing.Inference.init_strategy(::AMGS_Stopping_Tempered_Sampler) = DynamicPPL.InitFromPrior()
 
 # Get varinfo
 function Turing.Inference.get_varinfo(state::T) where {T<:AMGSStoppingTemperedState}
@@ -223,7 +225,7 @@ end
 
 function Turing.Inference.setparams_varinfo!!(
     model::DynamicPPL.Model,
-    sampler::Sampler{<:AMGS_Stopping_Tempered_Sampler},
+    sampler::AMGS_Stopping_Tempered_Sampler,
     state::AMGSStoppingTemperedState,
     params::AbstractVarInfo,
 )
@@ -234,9 +236,9 @@ function Turing.Inference.setparams_varinfo!!(
     vi  = last(DynamicPPL.evaluate!!(model, params)) 
 
     lp = DynamicPPL.getlogjoint_internal(vi)
-    tempered_lp = sampler.alg.temperature * (DynamicPPL.getlogprior(vi) + DynamicPPL.getloglikelihood(vi)) - DynamicPPL.getlogjac(vi)
+    tempered_lp = sampler.temperature * (DynamicPPL.getlogprior(vi) + DynamicPPL.getloglikelihood(vi)) - DynamicPPL.getlogjac(vi)
     # update the model state
-    new_transition = Turing.Inference.Transition(model, vi, (; lp_tempered = tempered_lp, lp_internal = lp))
+    new_transition = DynamicPPL.ParamsWithStats(vi, model, (; lp_tempered = tempered_lp, lp_internal = lp))
     new_state = AMGSStoppingTemperedState(new_transition, vi, state.μ, state.kernel, state.step, state.β, lp, tempered_lp, state.mean_accep, state.μ_running_avg, state.kernel_running_calc, state.stopped) 
     
     # Update the VarInfo with the new log density
@@ -252,25 +254,25 @@ Check whether adaptation should stop based on the current state and acceptance c
 # Arguments
 - `state::AMGSStoppingTemperedState`: The current sampler state.
 - `accepted::Bool`: Whether the current proposal was accepted.
-- `spl::Sampler{<:AMGS_Stopping_Tempered_Sampler}`: The AMGS Stopping Tempered sampler.
+- `spl::AMGS_Stopping_Tempered_Sampler`: The AMGS Stopping Tempered sampler.
 
 # Returns
 `true` if adaptation should stop, `false` otherwise.
 """
-function check_end_adaptation(state::AMGSStoppingTemperedState, accepted::Bool, spl::Sampler{<:AMGS_Stopping_Tempered_Sampler})
+function check_end_adaptation(state::AMGSStoppingTemperedState, accepted::Bool, spl::AMGS_Stopping_Tempered_Sampler)
     # Only check if this step we are at the end of an adaptation interval
-    if ((state.step + 1) % spl.alg.adaptation_interval) !== 0
+    if ((state.step + 1) % spl.adaptation_interval) !== 0
         return false
     end
     
     # End if we have hit the max adaptation steps
     # -1 indicates no max
-    if (spl.alg.max_adaptation != -1) && (state.step >= spl.alg.max_adaptation)
+    if (spl.max_adaptation != -1) && (state.step >= spl.max_adaptation)
         return true
     end
 
     # Check whether to stop adapting
-    if (state.mean_accep > spl.alg.lower_stopping_accep) && (state.mean_accep < spl.alg.upper_stopping_accep)
+    if (state.mean_accep > spl.lower_stopping_accep) && (state.mean_accep < spl.upper_stopping_accep)
         return true
     end
     return false
@@ -309,7 +311,7 @@ function running_update_state(state::AMGSStoppingTemperedState, step_mod::Int, a
             state.β,
             state.logjoint_internal,
             state.logjoint_tempered,
-            state.mean_accep + accepted /spl.alg.adaptation_interval,
+            state.mean_accep + accepted /spl.adaptation_interval,
             theta,
             state.kernel,
             stop_adapting
@@ -327,7 +329,7 @@ function running_update_state(state::AMGSStoppingTemperedState, step_mod::Int, a
             state.β,
             state.logjoint_internal,
             state.logjoint_tempered,
-            state.mean_accep + accepted /spl.alg.adaptation_interval,
+            state.mean_accep + accepted /spl.adaptation_interval,
             running_μ,
             (step_mod * state.kernel_running_calc .+ δ * transpose(theta .- running_μ)) ./ n,
             stop_adapting
@@ -339,23 +341,23 @@ end
 
 # Write a function which proposes a new set of parameters
 """
-    propose_amgs(rng::AbstractRNG, vi::AbstractVarInfo, model::AbstractMCMC.AbstractModel, spl::Sampler{<:AMGS_Stopping_Tempered_Sampler}, Σ::AbstractMatrix)
+    propose_amgs(rng::AbstractRNG, vi::AbstractVarInfo, model::DynamicPPL.Model, spl::AMGS_Stopping_Tempered_Sampler, Σ::AbstractMatrix)
 
 Propose a new set of parameters for the AMGS Tempered sampler.
 
 # Arguments
 - `rng::AbstractRNG`: The random number generator.
 - `vi::AbstractVarInfo`: The variable information.
-- `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::Sampler{<:AMGS_Stopping_Tempered_Sampler}`: The AMGS sampler.
+- `model::DynamicPPL.Model`: The model.
+- `spl::AMGS_Stopping_Tempered_Sampler`: The AMGS sampler.
 - `state::AMGSStoppingTemperedState`: The current state of the sampler.
 - `Σ::AbstractMatrix`: The covariance matrix for the proposal.
 """
 function propose_amgs(
     rng::AbstractRNG,
     vi::AbstractVarInfo,
-    model::AbstractMCMC.AbstractModel,
-    spl::Sampler{<:AMGS_Stopping_Tempered_Sampler},
+    model::DynamicPPL.Model,
+    spl::AMGS_Stopping_Tempered_Sampler,
     state::AMGSStoppingTemperedState,
     Σ::AbstractMatrix
 )
@@ -371,33 +373,36 @@ function propose_amgs(
 end
 
 """
-    AbstractMCMC.step_warmup(rng::AbstractRNG, model::AbstractMCMC.AbstractModel, spl::Sampler{<:AMGS_Stopping_Tempered_Sampler}; initial_params=nothing, kwargs...)
+    AbstractMCMC.step_warmup(rng::AbstractRNG, model::DynamicPPL.Model, spl::AMGS_Stopping_Tempered_Sampler; initial_params=nothing, kwargs...)
 
 Perform an initial warmup step for the AMGS Tempered sampler.
 
 # Arguments
 - `rng::AbstractRNG`: The random number generator.
-- `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::Sampler{<:AMGS_Stopping_Tempered_Sampler}`: The AMGS sampler.
+- `model::DynamicPPL.Model`: The model.
+- `spl::AMGS_Stopping_Tempered_Sampler`: The AMGS sampler.
 - `initial_params`: The initial parameters (optional).
 - `kwargs...`: Additional keyword arguments.
 """
 function AbstractMCMC.step_warmup(
     rng::AbstractRNG,
-    model::AbstractMCMC.AbstractModel,
-    spl::Sampler{<:AMGS_Stopping_Tempered_Sampler};
-    initial_params=nothing,
+    model::DynamicPPL.Model,
+    spl::AMGS_Stopping_Tempered_Sampler;
+    initial_params=Turing.Inference.init_strategy(spl),
     kwargs...,
 )
+    vis = DynamicPPL.VarInfo(model)
+    _, vis = DynamicPPL.init!!(rng, model, vis, initial_params)
     # If we're doing random walk with a covariance matrix,
     # just link everything before sampling.
-    vis = DynamicPPL.default_varinfo(rng, model, spl)
+    
+    # vis = DynamicPPL.default_varinfo(rng, model, spl)
 
-    # If there are initial parameters, set them and the logdensity
-    if initial_params !== nothing
-        vis = DynamicPPL.initialize_parameters!!(vis, initial_params, model)
-        vis = last(DynamicPPL.evaluate!!(model, vis))
-    end
+    # # If there are initial parameters, set them and the logdensity
+    # if initial_params !== nothing
+    #     vis = DynamicPPL.initialize_parameters!!(vis, initial_params, model)
+    #     vis = last(DynamicPPL.evaluate!!(model, vis))
+    # end
 
     # Link the variables
     DynamicPPL.link!!(vis, model)
@@ -405,14 +410,14 @@ function AbstractMCMC.step_warmup(
 
     # Get the log density of the current parameters
     lp_old = DynamicPPL.getlogjoint_internal(vis)
-    prev_transition = Turing.Inference.Transition(model, vis, (; lp_tempered = spl.alg.temperature * (DynamicPPL.getlogprior(vis) + DynamicPPL.getloglikelihood(vis)) - DynamicPPL.getlogjac(vis), lp_internal = lp_old))
+    prev_transition = DynamicPPL.ParamsWithStats(vis, model, (; lp_tempered = spl.temperature * (DynamicPPL.getlogprior(vis) + DynamicPPL.getloglikelihood(vis)) - DynamicPPL.getlogjac(vis), lp_internal = lp_old))
 
     # Get the parameters of interest and create the covariance matrix
     theta = vis[:]
     Σ = diagm(0.01 .* abs.(theta) .+ 1e-6)
 
     # get the old state:
-    orig_state = init_AMGSStoppingTemperedState(prev_transition, vis, theta, Σ, spl.alg.temperature)
+    orig_state = init_AMGSStoppingTemperedState(prev_transition, vis, theta, Σ, spl.temperature)
 
     # Propose a new set of parameters and grab the log density
     new_state = propose_amgs(rng, vis, model, spl, orig_state, Σ)
@@ -429,21 +434,21 @@ function AbstractMCMC.step_warmup(
 end
 
 """
-    AbstractMCMC.step_warmup(rng::AbstractRNG, model::AbstractMCMC.AbstractModel, spl::Sampler{<:AMGS_Stopping_Tempered_Sampler}, state::AMGSState; initial_params=nothing, kwargs...)
+    AbstractMCMC.step_warmup(rng::AbstractRNG, model::DynamicPPL.Model, spl::AMGS_Stopping_Tempered_Sampler, state::AMGSState; initial_params=nothing, kwargs...)
 
 Perform a warmup step for the AMGS Tempered sampler for a given state.
 
 # Arguments
 - `rng::AbstractRNG`: The random number generator.
-- `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::Sampler{<:AMGS_Stopping_Tempered_Sampler}`: The AMGS sampler.
+- `model::DynamicPPL.Model`: The model.
+- `spl::AMGS_Stopping_Tempered_Sampler`: The AMGS sampler.
 - `state::AMGSStoppingTemperedState`: The current state of the sampler.
 - `kwargs...`: Additional keyword arguments.
 """
 function AbstractMCMC.step_warmup(
     rng::AbstractRNG,
-    model::AbstractMCMC.AbstractModel,
-    spl::Sampler{<:AMGS_Stopping_Tempered_Sampler},
+    model::DynamicPPL.Model,
+    spl::AMGS_Stopping_Tempered_Sampler,
     state::AMGSStoppingTemperedState;
     kwargs...
 )
@@ -465,31 +470,33 @@ function AbstractMCMC.step_warmup(
 end
 
 """
-    AbstractMCMC.step(rng::AbstractRNG, model::DynamicPPL.Model, spl::Sampler{<:AMGS_Stopping_Tempered_Sampler}; initial_params=nothing, kwargs...)
+    AbstractMCMC.step(rng::AbstractRNG, model::DynamicPPL.Model, spl::AMGS_Stopping_Tempered_Sampler; initial_params=nothing, kwargs...)
 
 Perform an initial sampling step for the AMGS Tempered sampler.
 
 # Arguments
 - `rng::AbstractRNG`: The random number generator.
 - `model::DynamicPPL.Model`: The model.
-- `spl::Sampler{<:AMGS_Stopping_Tempered_Sampler}`: The AMGS sampler.
+- `spl::AMGS_Stopping_Tempered_Sampler`: The AMGS sampler.
 - `initial_params`: The initial parameters (optional).
 - `kwargs...`: Additional keyword arguments.
 """
 function AbstractMCMC.step(
     rng::AbstractRNG,
     model::DynamicPPL.Model,
-    spl::Sampler{<:AMGS_Stopping_Tempered_Sampler};
-    initial_params=nothing,
+    spl::AMGS_Stopping_Tempered_Sampler;
+    initial_params=Turing.Inference.init_strategy(spl),
     kwargs...,
 )
-    vis = DynamicPPL.default_varinfo(rng, model, spl)
+    varinfo = DynamicPPL.VarInfo(model)
+    _, varinfo = DynamicPPL.init!!(rng, model, varinfo, initial_params)
+    # vis = DynamicPPL.default_varinfo(rng, model, spl)
 
-    # If there are initial parameters, set them and the logdensity
-    if initial_params !== nothing
-        vis = DynamicPPL.initialize_parameters!!(vis, initial_params, model)
-        vis = last(DynamicPPL.evaluate!!(model, vis))
-    end    # Link the variables
+    # # If there are initial parameters, set them and the logdensity
+    # if initial_params !== nothing
+    #     vis = DynamicPPL.initialize_parameters!!(vis, initial_params, model)
+    #     vis = last(DynamicPPL.evaluate!!(model, vis))
+    # end    # Link the variables
 
     vis = DynamicPPL.link!!(vis, model)
     vis = last(DynamicPPL.evaluate!!(model, vis))
@@ -498,13 +505,13 @@ function AbstractMCMC.step(
     # lp_old = DynamicPPL.getlogjoint_internal(vis)
 
     # Create a transition object in case of rejection
-    prev_transition = Turing.Inference.Transition(model, vis, (;lp_tempered = spl.alg.temperature * (DynamicPPL.getlogprior(vis) + DynamicPPL.getloglikelihood(vis)) - DynamicPPL.getlogjac(vis), lp_internal = DynamicPPL.getlogjoint_internal(vis)))
+    prev_transition = DynamicPPL.ParamsWithStats(vis, model, (;lp_tempered = spl.temperature * (DynamicPPL.getlogprior(vis) + DynamicPPL.getloglikelihood(vis)) - DynamicPPL.getlogjac(vis), lp_internal = DynamicPPL.getlogjoint_internal(vis)))
 
     # Get the parameters of interest and create the covariance matrix
     theta = vis[:]
     Σ = diagm(0.01 .* abs.(theta) .+ 1e-6)
 
-    orig_state = init_AMGSStoppingTemperedState(prev_transition, vis, theta, Σ, spl.alg.temperature)
+    orig_state = init_AMGSStoppingTemperedState(prev_transition, vis, theta, Σ, spl.temperature)
     lp_old = orig_state.logjoint_tempered
     # Propose a new set of parameters and grab the log density
     proposal_state = propose_amgs(rng, vis, model, spl, orig_state, Σ)
@@ -521,7 +528,7 @@ function AbstractMCMC.step(
     upd_state = accep ? proposal_state : orig_state
     
     # Update the running mean and covariance and check whether the adaptation should stop
-    upd_state = running_update_state(upd_state, upd_state.step % spl.alg.adaptation_interval, accep, spl)
+    upd_state = running_update_state(upd_state, upd_state.step % spl.adaptation_interval, accep, spl)
 
     # If stopped, do not update the kernel
     if upd_state.stopped
@@ -531,7 +538,7 @@ function AbstractMCMC.step(
     # Update the kernel and return the new transition and state
     prob = exp(min(0.0, (lp_proposal - lp_old)))
     
-    if (upd_state.step % spl.alg.adaptation_interval) == 0
+    if (upd_state.step % spl.adaptation_interval) == 0
         _, upd_state = update_kernel(rng, upd_state, new_trans, spl, prob)
     end
 
@@ -539,21 +546,21 @@ function AbstractMCMC.step(
 end
 
 """
-    AbstractMCMC.step(rng::AbstractRNG, model::DynamicPPL.Model, spl::Sampler{<:AMGS_Stopping_Tempered_Sampler}, state::AMGSState; initial_params=nothing, kwargs...)
+    AbstractMCMC.step(rng::AbstractRNG, model::DynamicPPL.Model, spl::AMGS_Stopping_Tempered_Sampler, state::AMGSState; initial_params=nothing, kwargs...)
 
 Perform a sampling step for the AMGS Tempered sampler given a state.
 
 # Arguments
 - `rng::AbstractRNG`: The random number generator.
 - `model::DynamicPPL.Model`: The model.
-- `spl::Sampler{<:AMGS_Stopping_Tempered_Sampler}`: The AMGS sampler.
+- `spl::AMGS_Stopping_Tempered_Sampler`: The AMGS sampler.
 - `state::AMGSStoppingTemperedState`: The current state of the sampler.
 - `kwargs...`: Additional keyword arguments.
 """
 function AbstractMCMC.step(
     rng::AbstractRNG,
-    model::AbstractMCMC.AbstractModel,
-    spl::Sampler{<:AMGS_Stopping_Tempered_Sampler},
+    model::DynamicPPL.Model,
+    spl::AMGS_Stopping_Tempered_Sampler,
     state::AMGSStoppingTemperedState;
     kwargs...
 )
@@ -571,7 +578,7 @@ function AbstractMCMC.step(
     new_state = accep ? proposal_state : state
 
     # Update the running mean and covariance and check whether the adaptation should stop
-    new_state = running_update_state(new_state, new_state.step % spl.alg.adaptation_interval, accep, spl)
+    new_state = running_update_state(new_state, new_state.step % spl.adaptation_interval, accep, spl)
 
     #if stopped, do not update the kernel
     if !new_state.stopped
@@ -586,12 +593,12 @@ end
 
 
 # Define assume functions for the AMGS Tempered sampler
-function DynamicPPL.assume(
-    rng::Random.AbstractRNG, spl::DynamicPPL.Sampler{<:AMGS_Stopping_Tempered_Sampler}, dist::Distribution, vn::DynamicPPL.VarName, vi
-)
-    # DynamicPPL.updategid!(vi, vn, spl)
-    return DynamicPPL.assume(dist, vn, vi)
-end
+# function DynamicPPL.assume(
+#     rng::Random.AbstractRNG, spl::AMGS_Stopping_Tempered_Sampler, dist::Distribution, vn::DynamicPPL.VarName, vi
+# )
+#     # DynamicPPL.updategid!(vi, vn, spl)
+#     return DynamicPPL.assume(dist, vn, vi)
+# end
 
 # Define function to get log evidence
 """
@@ -601,23 +608,23 @@ Get the log evidence from a collection of transitions. For AMGS samplers, this r
 
 # Arguments
 - `transitions`: Vector of transitions from the sampling process.
-- `sampler::DynamicPPL.Sampler{<:AMGS_Stopping_Tempered_Sampler}`: The AMGS Stopping Tempered sampler.
+- `sampler::AMGS_Stopping_Tempered_Sampler`: The AMGS Stopping Tempered sampler.
 - `state`: The final sampler state.
 
 # Returns
 `missing` (log evidence computation not implemented for AMGS samplers).
 """
-getlogevidence(transitions, sampler::DynamicPPL.Sampler{<:AMGS_Stopping_Tempered_Sampler}, state) = missing
+getlogevidence(transitions, sampler::AMGS_Stopping_Tempered_Sampler, state) = missing
 
 """
-    AbstractMCMC.bundle_samples(ts::Vector{<:Turing.Inference.Transition}, model::AbstractMCMC.AbstractModel, spl::DynamicPPL.Sampler{<:AMGS_Stopping_Tempered_Sampler}, state, chain_type::Type{MCMCChains.Chains}; save_state=false, stats=missing, sort_chain=false, include_varname_to_symbol=true, discard_initial=0, thinning=1, kwargs...)
+    AbstractMCMC.bundle_samples(ts::Vector{<:DynamicPPL.ParamsWithStats}, model::DynamicPPL.Model, spl::AMGS_Stopping_Tempered_Sampler, state, chain_type::Type{MCMCChains.Chains}; save_state=false, stats=missing, sort_chain=false, include_varname_to_symbol=true, discard_initial=0, thinning=1, kwargs...)
 
 Bundle the samples from the AMGS Tempered sampler into an MCMCChains Chain.
 
 # Arguments
-- `ts::Vector{<:Turing.Inference.Transition}`: The Vector of transitions.
-- `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::DynamicPPL.Sampler{<:AMGS_Stopping_Tempered_Sampler}`: The AMGS sampler.
+- `ts::Vector{<:DynamicPPL.ParamsWithStats}`: The Vector of transitions.
+- `model::DynamicPPL.Model`: The model.
+- `spl::AMGS_Stopping_Tempered_Sampler`: The AMGS sampler.
 - `state`: The current state of the sampler.
 - `chain_type::Type{MCMCChains.Chains}`: The type of chain.
 - `save_state`: Whether to save the state (default: false).
@@ -628,66 +635,66 @@ Bundle the samples from the AMGS Tempered sampler into an MCMCChains Chain.
 - `thinning`: The thinning interval (default: 1).
 - `kwargs...`: Additional keyword arguments.
 """
-function AbstractMCMC.bundle_samples(
-    ts::Vector{<:Turing.Inference.Transition},
-    model::AbstractMCMC.AbstractModel,
-    spl::DynamicPPL.Sampler{<:AMGS_Stopping_Tempered_Sampler},
-    state,
-    chain_type::Type{MCMCChains.Chains};
-    save_state=false,
-    stats=missing,
-    sort_chain=false,
-    include_varname_to_symbol=true,
-    discard_initial=0,
-    thinning=1,
-    kwargs...,
-)
-
-    # Convert transitions to array format.
-    # Also retrieve the variable names.
-    varnames, vals = _params_to_array(model, ts)
-    varnames_symbol = map(Symbol, varnames)
-
-    # Get the values of the extra parameters in each transition.
-    extra_params, extra_values = Turing.Inference.get_transition_extras(ts)
-
-    # Extract names & construct param array.
-    nms = [varnames_symbol; extra_params]
-    parray = hcat(vals, extra_values)
-
-    # Get the average or final log evidence, if it exists.
-    le = getlogevidence(ts, spl, state)
-
-    # Set up the info tuple.
-    info = NamedTuple()
-
-    if include_varname_to_symbol
-        info = merge(info, (varname_to_symbol=OrderedDict(zip(varnames, varnames_symbol)),))
-    end
-
-    if save_state
-        info = merge(info, (model=model, sampler=spl, samplerstate=state))
-    end
-
-    # Merge in the timing info, if available
-    if !ismissing(stats)
-        info = merge(info, (start_time=stats.start, stop_time=stats.stop))
-    end
-
-    # Conretize the array before giving it to MCMCChains.
-    parray = MCMCChains.concretize(parray)
-
-    # Chain construction.
-    chain = MCMCChains.Chains(
-        parray,
-        nms,
-        (internals=extra_params,);
-        evidence=le,
-        info=info,
-        start=discard_initial + 1,
-        thin=thinning,
-    )
-
-    return sort_chain ? sort(chain) : chain
-end
-
+# function AbstractMCMC.bundle_samples(
+#     ts::Vector{<:DynamicPPL.ParamsWithStats},
+#     model::DynamicPPL.Model,
+#     spl::AMGS_Stopping_Tempered_Sampler,
+#     state,
+#     chain_type::Type{MCMCChains.Chains};
+#     save_state=false,
+#     stats=missing,
+#     sort_chain=false,
+#     include_varname_to_symbol=true,
+#     discard_initial=0,
+#     thinning=1,
+#     kwargs...,
+# )
+# 
+#     # Convert transitions to array format.
+#     # Also retrieve the variable names.
+#     varnames, vals = _params_to_array(model, ts)
+#     varnames_symbol = map(Symbol, varnames)
+# 
+#     # Get the values of the extra parameters in each transition.
+#     extra_params, extra_values = Turing.Inference.get_transition_extras(ts)
+# 
+#     # Extract names & construct param array.
+#     nms = [varnames_symbol; extra_params]
+#     parray = hcat(vals, extra_values)
+# 
+#     # Get the average or final log evidence, if it exists.
+#     le = getlogevidence(ts, spl, state)
+# 
+#     # Set up the info tuple.
+#     info = NamedTuple()
+# 
+#     if include_varname_to_symbol
+#         info = merge(info, (varname_to_symbol=OrderedDict(zip(varnames, varnames_symbol)),))
+#     end
+# 
+#     if save_state
+#         info = merge(info, (model=model, sampler=spl, samplerstate=state))
+#     end
+# 
+#     # Merge in the timing info, if available
+#     if !ismissing(stats)
+#         info = merge(info, (start_time=stats.start, stop_time=stats.stop))
+#     end
+# 
+#     # Conretize the array before giving it to MCMCChains.
+#     parray = MCMCChains.concretize(parray)
+# 
+#     # Chain construction.
+#     chain = MCMCChains.Chains(
+#         parray,
+#         nms,
+#         (internals=extra_params,);
+#         evidence=le,
+#         info=info,
+#         start=discard_initial + 1,
+#         thin=thinning,
+#     )
+# 
+#     return sort_chain ? sort(chain) : chain
+# end
+# 

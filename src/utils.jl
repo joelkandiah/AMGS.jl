@@ -48,7 +48,20 @@ Draw a Multivariate Normal proposal centered at `θ` with covariance `Σ`.
 - A vector containing the proposed parameters.
 """
 function proposewalk(rng::Random.AbstractRNG, θ::AbstractVector, Σ::AbstractMatrix)
-    return rand(rng, MvNormal(eltype(Σ).(θ), Σ))
+    # Optimized: use direct Cholesky sampling instead of MvNormal constructor
+    # This avoids allocating a new distribution object on every call
+    n = length(θ)
+    z = randn(rng, n)
+    L = cholesky(Symmetric(Σ)).L
+    return θ .+ L * z
+end
+
+# Overload for pre-factorized covariance (for caching scenarios)
+function proposewalk(rng::Random.AbstractRNG, θ::AbstractVector, L::LowerTriangular)
+    # When Cholesky factorization is pre-computed and cached
+    n = length(θ)
+    z = randn(rng, n)
+    return θ .+ L * z
 end
 
 # Define a function which proposes a new set of parameters
@@ -68,7 +81,8 @@ RAM-style proposal: sample a standard normal `U` and return `(θ + S*U, U)`.
   for reversible jump / RAM adjustments.
 """
 function proposewalkram(rng::Random.AbstractRNG, θ::AbstractVector, S::LowerTriangular)
-    U = rand(rng, MvNormal(zeros(length(θ)), LinearAlgebra.I))
+    # Optimized: avoid allocating zeros vector and use randn directly
+    U = randn(rng, length(θ))
     return θ + S * U, U
 end
 
@@ -202,6 +216,31 @@ function _params_to_array(model::DynamicPPL.Model, ts::Vector)
 
     return names, vals
 end
+
+
+struct AMGSContext{R<:AbstractRNG} <: DynamicPPL.AbstractContext
+    rng::R
+end
+
+function DynamicPPL.tilde_assume!!(
+    context::AMGSContext, right::Distribution, vn::VarName, vi::AbstractVarInfo
+)
+    # Allow MH to sample new variables from the prior if it's not already present in the
+    # VarInfo.
+    dispatch_ctx = if haskey(vi, vn)
+        DynamicPPL.DefaultContext()
+    else
+        DynamicPPL.InitContext(context.rng, DynamicPPL.InitFromPrior())
+    end
+    return DynamicPPL.tilde_assume!!(dispatch_ctx, right, vn, vi)
+end
+
+function DynamicPPL.tilde_observe!!(
+    ::AMGSContext, right::Distribution, left, vn::Union{VarName,Nothing}, vi::AbstractVarInfo
+)
+    return DynamicPPL.tilde_observe!!(DefaultContext(), right, left, vn, vi)
+end
+
 
 # function _params_to_array(model::DynamicPPL.Model, ts::Vector)
 #     names_set = OrderedSet{VarName}()

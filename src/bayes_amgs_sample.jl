@@ -3,7 +3,7 @@
 
 # Start by defining the sampler
 
-struct Bayes_AMGS_Sampler{T_accep <: Real, T_ν <: Real, T_λ <: Real, T_noise_scaling <: Real} <: Turing.InferenceAlgorithm
+struct Bayes_AMGS_Sampler{T_accep <: Real, T_ν <: Real, T_λ <: Real, T_noise_scaling <: Real} <: AbstractMCMC.AbstractSampler
     acceptance_rate::T_accep
     ν₀::T_ν
     λ_min::T_λ
@@ -34,7 +34,7 @@ function Bayes_AMGS_Sampler(
     return Bayes_AMGS_Sampler{T1, T2, T3, Float64}(acceptance_rate, ν₀, λ_min, f, false, 1e-6)
 end
 
-DynamicPPL.default_chain_type(sampler::Sampler{<:Bayes_AMGS_Sampler}) = MCMCChains.Chains
+# DynamicPPL.default_chain_type(sampler::Bayes_AMGS_Sampler) = MCMCChains.Chains
 
 # Define the state of the sampler
 # Contains Important quantities for computation of the updated kernel
@@ -45,7 +45,7 @@ State container used by the Bayes AMGS sampler to store running statistics
 for Bayesian adaptive MCMC with complex adaptation schemes.
 
 # Fields
-- `transition`: the latest `Turing.Inference.Transition` object.
+- `transition`: the latest `DynamicPPL.ParamsWithStats` object.
 - `varinfo`: the `VarInfo` corresponding to the current parameter values.
 - `μ`: running mean vector of parameters.
 - `kernel`: running covariance (or scale) matrix used for proposals.
@@ -61,7 +61,7 @@ for Bayesian adaptive MCMC with complex adaptation schemes.
 - `logjoint_internal`: cached log joint density for the current state.
 """
 struct BayesAMGSState{
-    TTrans<:Turing.Inference.Transition,
+    TTrans<:DynamicPPL.ParamsWithStats,
     TVI<:AbstractVarInfo,
     Tμ_el <: Real,
     Tμ <: AbstractVector{Tμ_el},
@@ -130,7 +130,7 @@ end
 
 # Define the initial state of the sampler, use the paper to understand A, δ, d and c
 """
-    init_BayesAMGSState(transition::T_trans, μ::T_μ, kernel::T_kernel, n_start::T_nstart, A::T_A, δ::T_δ, d::T_d, c::T_c) where {T_trans <: Turing.Inference.Transition, T_μ <: AbstractVector, T_kernel <: AbstractMatrix, T_nstart <: Real, T_A <: Real, T_δ <: Real, T_d <: Int, T_c <: Real}
+    init_BayesAMGSState(transition::T_trans, μ::T_μ, kernel::T_kernel, n_start::T_nstart, A::T_A, δ::T_δ, d::T_d, c::T_c) where {T_trans <: DynamicPPL.ParamsWithStats, T_μ <: AbstractVector, T_kernel <: AbstractMatrix, T_nstart <: Real, T_A <: Real, T_δ <: Real, T_d <: Int, T_c <: Real}
 
 Initialize the state of the Bayes AMGS sampler with the given transition, mean vector μ, kernel matrix, and other parameters.
 
@@ -154,7 +154,7 @@ function init_BayesAMGSState(
     δ::T_δ,
     d::T_d,
     c::T_c
-) where { T_trans <: Turing.Inference.Transition, TVI<:AbstractVarInfo, T_μ <: AbstractVector, T_kernel <: AbstractMatrix, T_nstart <: Real, T_A <: Real, T_δ <: Real, T_d <: Int, T_c <: Real}
+) where { T_trans <: DynamicPPL.ParamsWithStats, TVI<:AbstractVarInfo, T_μ <: AbstractVector, T_kernel <: AbstractMatrix, T_nstart <: Real, T_A <: Real, T_δ <: Real, T_d <: Int, T_c <: Real}
     ## copy vector length of mu and initialise zero vector for beta
     step = 1
     λ_start = λ₀ = one(Float64)
@@ -165,17 +165,17 @@ end
 
 # Write a function which updates the kernel
 """
-    update_kernel(rng::TRNG, state::BayesAMGSState, trans::Turing.Inference.Transition, spl::Sampler{<:Bayes_AMGS_Sampler}, prob::T3) where {T3 <: Real, TRNG <: AbstractRNG}
+    update_kernel(rng::TRNG, state::BayesAMGSState, trans::DynamicPPL.ParamsWithStats, spl::Bayes_AMGS_Sampler, prob::T3) where {T3 <: Real, TRNG <: AbstractRNG}
 
 Update the kernel matrix of the Bayes AMGS sampler state based on the new transition and acceptance probability.
 
 # Arguments
 - `state::BayesAMGSState`: The current state of the sampler.
-- `trans::Turing.Inference.Transition`: The new transition object.
-- `spl::Sampler{<:Bayes_AMGS_Sampler}`: The Bayes AMGS sampler.
+- `trans::DynamicPPL.ParamsWithStats`: The new transition object.
+- `spl::Bayes_AMGS_Sampler`: The Bayes AMGS sampler.
 - `prob::T3`: The acceptance probability.
 """
-function update_kernel(rng::TRNG, state::BayesAMGSState, trans::Turing.Inference.Transition, spl::Sampler{<:Bayes_AMGS_Sampler}, prob::T3) where {T3 <: Real, TRNG <: AbstractRNG}
+function update_kernel(rng::TRNG, state::BayesAMGSState, trans::DynamicPPL.ParamsWithStats, spl::Bayes_AMGS_Sampler, prob::T3) where {T3 <: Real, TRNG <: AbstractRNG}
     # Grab useful quantities from the state
     S = state.kernel
     step = state.step
@@ -189,15 +189,15 @@ function update_kernel(rng::TRNG, state::BayesAMGSState, trans::Turing.Inference
 
     μ = state.μ
 
-    f_step = spl.alg.f(step)
-    f_prev_step = spl.alg.f(step - 1)
+    f_step = spl.f(step)
+    f_prev_step = spl.f(step - 1)
 
     n_start = state.n_start
     λ_start = state.λ_start
 
-    ν = spl.alg.ν₀
+    ν = spl.ν₀
     d = state.d
-    noise_term = spl.alg.use_noise_stabiliser * spl.alg.noise_scaling
+    noise_term = spl.use_noise_stabiliser * spl.noise_scaling
 
     # Perform the update differently depending on whether we are dropping one of the 
     if step == 1
@@ -216,11 +216,11 @@ function update_kernel(rng::TRNG, state::BayesAMGSState, trans::Turing.Inference
         S = S + diagm(noise_term .* rand(rng, size(X_n)[1]))
     end
 
-    λ = max(spl.alg.λ_min, λ * exp((δ / (n_start + step)) * (prob - spl.alg.acceptance_rate)))
+    λ = max(spl.λ_min, λ * exp((δ / (n_start + step)) * (prob - spl.acceptance_rate)))
     
     if abs(λ - λ_start) > log(3)
         λ_start = λ
-        n_start = (5.0 / (spl.alg.acceptance_rate * (1.0 - spl.alg.acceptance_rate))) - step
+        n_start = (5.0 / (spl.acceptance_rate * (1.0 - spl.acceptance_rate))) - step
     end
     new_state = BayesAMGSState(trans, state.varinfo, X̄, S, step + 1, λ, λ_start, n_start, state.A, state.δ, state.d, state.c, vec_X, state.logjoint_internal)
     return new_state
@@ -228,6 +228,8 @@ end
 
 # Function to set the new parameters (for use with gibbs sampler)
 Turing.Inference.isgibbscomponent(::Bayes_AMGS_Sampler) = true 
+
+Turing.Inference.init_strategy(::Bayes_AMGS_Sampler) = DynamicPPL.InitFromPrior()
 
 # Get varinfo
 function Turing.Inference.get_varinfo(state::T) where {T<:BayesAMGSState}
@@ -242,7 +244,7 @@ end
 
 function Turing.Inference.setparams_varinfo!!(
     model::DynamicPPL.Model,
-    sampler::Sampler{<:Bayes_AMGS_Sampler},
+    sampler::Bayes_AMGS_Sampler,
     state::BayesAMGSState,
     params::AbstractVarInfo,
 )
@@ -253,7 +255,7 @@ function Turing.Inference.setparams_varinfo!!(
 
     lp = DynamicPPL.getlogjoint_internal(vi)
     # #update the model state
-    new_transition = Turing.Inference.Transition(model, vi, nothing)
+    new_transition = DynamicPPL.ParamsWithStats(vi, model)
     new_state = BayesAMGSState(new_transition, vi, state.μ, state.kernel, state.step, state.λ, state.λ_start, state.n_start, state.A, state.δ, state.d, state.c, state.vec_X, lp)
     
     # Update the VarInfo with the new log density
@@ -262,22 +264,22 @@ end
 
 # Write a function which proposes a new set of parameters
 """
-    propose_BayesAMGSLL(rng::T_rng, vi::AbstractVarInfo, model::AbstractMCMC.AbstractModel, spl::Sampler{<:Bayes_AMGS_Sampler}, S::T) where {T_rng <: AbstractRNG, T <: AbstractMatrix}
+    propose_BayesAMGSLL(rng::T_rng, vi::AbstractVarInfo, model::DynamicPPL.Model, spl::Bayes_AMGS_Sampler, S::T) where {T_rng <: AbstractRNG, T <: AbstractMatrix}
 
 Propose a new set of parameters for the Bayes AMGS sampler.
 
 # Arguments
 - `rng::T_rng`: The random number generator.
 - `vi::AbstractVarInfo`: The variable information.
-- `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::Sampler{<:Bayes_AMGS_Sampler}`: The Bayes AMGS sampler.
+- `model::DynamicPPL.Model`: The model.
+- `spl::Bayes_AMGS_Sampler`: The Bayes AMGS sampler.
 - `S::T`: The covariance matrix for the proposal.
 """
 function propose_BayesAMGSLL(
     rng::T_rng,
     vi::AbstractVarInfo,
-    model::AbstractMCMC.AbstractModel,
-    spl::Sampler{<:Bayes_AMGS_Sampler},
+    model::DynamicPPL.Model,
+    spl::Bayes_AMGS_Sampler,
     state::BayesAMGSState,
     S::T
 ) where {T_rng <: AbstractRNG, T <: AbstractMatrix}
@@ -294,33 +296,36 @@ end
 
 # Write a function which initialises the chain where there are warmup steps
 """
-    AbstractMCMC.step_warmup(rng::AbstractRNG, model::AbstractMCMC.AbstractModel, spl::Sampler{<:Bayes_AMGS_Sampler}; initial_params=nothing, kwargs...)
+    AbstractMCMC.step_warmup(rng::AbstractRNG, model::DynamicPPL.Model, spl::Bayes_AMGS_Sampler; initial_params=nothing, kwargs...)
 
 Perform an initial warmup step for the Bayes AMGS sampler.
 
 # Arguments
 - `rng::AbstractRNG`: The random number generator.
-- `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::Sampler{<:Bayes_AMGS_Sampler}`: The Bayes AMGS sampler.
+- `model::DynamicPPL.Model`: The model.
+- `spl::Bayes_AMGS_Sampler`: The Bayes AMGS sampler.
 - `initial_params`: The initial parameters (optional).
 - `kwargs...`: Additional keyword arguments.
 """
 function AbstractMCMC.step_warmup(
     rng::AbstractRNG,
-    model::AbstractMCMC.AbstractModel,
-    spl::Sampler{<:Bayes_AMGS_Sampler};
-    initial_params = nothing,
+    model::DynamicPPL.Model,
+    spl::Bayes_AMGS_Sampler;
+    initial_params = Turing.Inference.init_strategy(spl),
     kwargs...,
 )
+
+    vis = DynamicPPL.VarInfo(model)
+    _, vis = DynamicPPL.init!!(rng, model, vis, initial_params)
     # If we're doing random walk with a covariance matrix,
     # just link everything before sampling.
-    vis = DynamicPPL.default_varinfo(rng, model, spl)
+    # vis = DynamicPPL.default_varinfo(rng, model, spl)
 
-    # If there are initial parameters, set them and the logdensity
-    if initial_params !== nothing
-        vis = DynamicPPL.initialize_parameters!!(vis, initial_params, model)
-        vis = last(DynamicPPL.evaluate!!(model, vis))
-    end
+    # # If there are initial parameters, set them and the logdensity
+    # if initial_params !== nothing
+    #     vis = DynamicPPL.initialize_parameters!!(vis, initial_params, model)
+    #     vis = last(DynamicPPL.evaluate!!(model, vis))
+    # end
 
     # Link the variables
     DynamicPPL.link!!(vis, model)
@@ -328,14 +333,14 @@ function AbstractMCMC.step_warmup(
 
     # Get the log density of the current parameters
     lp_old = DynamicPPL.getlogjoint_internal(vis)
-    prev_transition = Turing.Inference.Transition(model, vis, nothing)
+    prev_transition = DynamicPPL.ParamsWithStats(vis, model)
 
     # Get the parameters of interest and create the covariance matrix
     theta = vis[:]
     S = 0.01 .* abs.(diagm(theta)) + (1e-6 * I)
 
     # Initialize parameters for the Bayes AMGS algorithm
-    a = spl.alg.acceptance_rate
+    a = spl.acceptance_rate
     d = length(theta)
     c = 2.38^2 / d
     n_start = 5 / (a * (1-a))
@@ -355,21 +360,21 @@ function AbstractMCMC.step_warmup(
 end
 
 """
-    AbstractMCMC.step_warmup(rng::AbstractRNG, model::AbstractMCMC.AbstractModel, spl::Sampler{<:Bayes_AMGS_Sampler}, state::BayesAMGSState; initial_params=nothing, kwargs...)
+    AbstractMCMC.step_warmup(rng::AbstractRNG, model::DynamicPPL.Model, spl::Bayes_AMGS_Sampler, state::BayesAMGSState; initial_params=nothing, kwargs...)
 
 Perform a warmup step for the Bayes AMGS sampler for a given state.
 
 # Arguments
 - `rng::AbstractRNG`: The random number generator.
-- `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::Sampler{<:Bayes_AMGS_Sampler}`: The Bayes AMGS sampler.
+- `model::DynamicPPL.Model`: The model.
+- `spl::Bayes_AMGS_Sampler`: The Bayes AMGS sampler.
 - `state::BayesAMGSState`: The current state of the sampler.
 - `kwargs...`: Additional keyword arguments.
 """
 function AbstractMCMC.step_warmup(
     rng::AbstractRNG,
-    model::AbstractMCMC.AbstractModel,
-    spl::Sampler{<:Bayes_AMGS_Sampler},
+    model::DynamicPPL.Model,
+    spl::Bayes_AMGS_Sampler,
     state::BayesAMGSState;
     kwargs...
 )
@@ -392,38 +397,40 @@ function AbstractMCMC.step_warmup(
     #end
 
     # Create a new transition and state object if accepted
-    #trans = Turing.Inference.Transition(vis, lp_proposal, true)
+    #trans = DynamicPPL.ParamsWithStats(vis, lp_proposal, true)
     #new_state = BayesAMGSState(trans, state.μ, state.kernel, state.step, state.λ, state.λ_start, state.n_start, state.A, state.δ, state.d, state.c, state.vec_X)
 
     return accep ? proposal_state.transition : state.transition, accep ? proposal_state : state 
 end
 
 """
-    AbstractMCMC.step(rng::AbstractRNG, model::DynamicPPL.Model, spl::Sampler{<:Bayes_AMGS_Sampler}; initial_params=nothing, kwargs...)
+    AbstractMCMC.step(rng::AbstractRNG, model::DynamicPPL.Model, spl::Bayes_AMGS_Sampler; initial_params=nothing, kwargs...)
 
 Perform an initial sampling step for the Bayes AMGS sampler.
 
 # Arguments
 - `rng::AbstractRNG`: The random number generator.
 - `model::DynamicPPL.Model`: The model.
-- `spl::Sampler{<:Bayes_AMGS_Sampler}`: The Bayes AMGS sampler.
+- `spl::Bayes_AMGS_Sampler`: The Bayes AMGS sampler.
 - `initial_params`: The initial parameters (optional).
 - `kwargs...`: Additional keyword arguments.
 """
 function AbstractMCMC.step(
     rng::AbstractRNG,
     model::DynamicPPL.Model,
-    spl::Sampler{<:Bayes_AMGS_Sampler};
-    initial_params = nothing,
+    spl::Bayes_AMGS_Sampler;
+    initial_params = Turing.Inference.init_strategy(spl),
     kwargs...,
 )
-    vis = DynamicPPL.default_varinfo(rng, model, spl)
+    vis = DynamicPPL.VarInfo(model)
+    _, vis = DynamicPPL.init!!(rng, model, vis, initial_params)
+    # vis = DynamicPPL.default_varinfo(rng, model, spl)
 
-    # If there are initial parameters, set them and the logdensity
-    if initial_params !== nothing
-        vis = DynamicPPL.initialize_parameters!!(vis, initial_params, model)
-        vis = last(DynamicPPL.evaluate!!(model, vis))
-    end    # Link the variables
+    # # If there are initial parameters, set them and the logdensity
+    # if initial_params !== nothing
+    #     vis = DynamicPPL.initialize_parameters!!(vis, initial_params, model)
+    #     vis = last(DynamicPPL.evaluate!!(model, vis))
+    # end    # Link the variables
 
     DynamicPPL.link!!(vis, model)
     DynamicPPL.evaluate!!(model, vis)
@@ -437,13 +444,13 @@ function AbstractMCMC.step(
     d = length(theta)
     c = 2.38^2 / d
 
-    a = spl.alg.acceptance_rate
+    a = spl.acceptance_rate
     n_start = 5.0 / (a * (1.0-a))
     A = -quantile(Normal(0,1), a * 0.5)
     δ = (1.0 - (1.0 / d)) * (sqrt(2 * π) * exp((A^2.0) / 2.0) / (2.0 * A)) + 1.0 / (d * a * (1.0 - a))
 
     # Create the initial transition object
-    prev_transition = Turing.Inference.Transition(model, vis, nothing)
+    prev_transition = DynamicPPL.ParamsWithStats(vis, model, nothing)
     new_state = init_BayesAMGSState(prev_transition, vis, theta, S, n_start, A, δ, d, c)
 
     proposal_state = propose_BayesAMGSLL(rng, vis, model, spl, orig_state, c * S)
@@ -459,21 +466,21 @@ function AbstractMCMC.step(
 end
 
 """
-    AbstractMCMC.step(rng::AbstractRNG, model::AbstractMCMC.AbstractModel, spl::Sampler{<:Bayes_AMGS_Sampler}, state::BayesAMGSState; initial_params=nothing, kwargs...)
+    AbstractMCMC.step(rng::AbstractRNG, model::DynamicPPL.Model, spl::Bayes_AMGS_Sampler, state::BayesAMGSState; initial_params=nothing, kwargs...)
 
 Perform a sampling step for the Bayes AMGS sampler for a given state.
 
 # Arguments
 - `rng::AbstractRNG`: The random number generator.
-- `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::Sampler{<:Bayes_AMGS_Sampler}`: The Bayes AMGS sampler.
+- `model::DynamicPPL.Model`: The model.
+- `spl::Bayes_AMGS_Sampler`: The Bayes AMGS sampler.
 - `state::BayesAMGSState`: The current state of the sampler.
 - `kwargs...`: Additional keyword arguments.
 """
 function AbstractMCMC.step(
     rng::AbstractRNG,
-    model::AbstractMCMC.AbstractModel,
-    spl::Sampler{<:Bayes_AMGS_Sampler},
+    model::DynamicPPL.Model,
+    spl::Bayes_AMGS_Sampler,
     state::BayesAMGSState;
     kwargs...,
 )
@@ -493,24 +500,24 @@ function AbstractMCMC.step(
     return new_trans, new_state
 end
 
-function DynamicPPL.assume(
-    rng::Random.AbstractRNG, spl::DynamicPPL.Sampler{<:Bayes_AMGS_Sampler}, dist::Distribution, vn::DynamicPPL.VarName, vi
-)
-    # DynamicPPL.updategid!(vi, vn, spl)
-    return DynamicPPL.assume(dist, vn, vi)
-end
-
-getlogevidence(transitions, sampler::DynamicPPL.Sampler{<:Bayes_AMGS_Sampler}, state) = missing
+#function DynamicPPL.assume(
+#    rng::Random.AbstractRNG, spl::Bayes_AMGS_Sampler, dist::Distribution, vn::DynamicPPL.VarName, vi
+#)
+#    # DynamicPPL.updategid!(vi, vn, spl)
+#    return DynamicPPL.assume(dist, vn, vi)
+#end
+ 
+getlogevidence(transitions, sampler::Bayes_AMGS_Sampler, state) = missing
 
 """
-    AbstractMCMC.bundle_samples(ts::Vector{<:Turing.Inference.Transition}, model::AbstractMCMC.AbstractModel, spl::DynamicPPL.Sampler{<:Bayes_AMGS_Sampler}, state, chain_type::Type{MCMCChains.Chains}; save_state=false, stats=missing, sort_chain=false, include_varname_to_symbol=true, discard_initial=0, thinning=1, kwargs...)
+    AbstractMCMC.bundle_samples(ts::Vector{<:DynamicPPL.ParamsWithStats}, model::DynamicPPL.Model, spl::Bayes_AMGS_Sampler, state, chain_type::Type{MCMCChains.Chains}; save_state=false, stats=missing, sort_chain=false, include_varname_to_symbol=true, discard_initial=0, thinning=1, kwargs...)
 
 Bundle the samples from the Bayes AMGS sampler into a chain.
 
 # Arguments
-- `ts::Vector{<:Turing.Inference.Transition}`: The Vector of transitions.
-- `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::DynamicPPL.Sampler{<:Bayes_AMGS_Sampler}`: The Bayes AMGS sampler.
+- `ts::Vector{<:DynamicPPL.ParamsWithStats}`: The Vector of transitions.
+- `model::DynamicPPL.Model`: The model.
+- `spl::Bayes_AMGS_Sampler`: The Bayes AMGS sampler.
 - `state`: The current state of the sampler.
 - `chain_type::Type{MCMCChains.Chains}`: The chain type.
 - `save_state`: Whether to save the state.
@@ -521,64 +528,64 @@ Bundle the samples from the Bayes AMGS sampler into a chain.
 - `thinning`: The thinning interval.
 - `kwargs...`: Additional keyword arguments.
 """
-function AbstractMCMC.bundle_samples(
-    ts::Vector{<:Turing.Inference.Transition},
-    model::AbstractMCMC.AbstractModel,
-    spl::DynamicPPL.Sampler{<:Bayes_AMGS_Sampler},
-    state,
-    chain_type::Type{MCMCChains.Chains};
-    save_state=false,
-    stats=missing,
-    sort_chain=false,
-    include_varname_to_symbol=true,
-    discard_initial=0,
-    thinning=1,
-    kwargs...,
-)
-    # Convert transitions to array format.
-    # Also retrieve the variable names.
-    varnames, vals = _params_to_array(model, ts)
-    varnames_symbol = map(Symbol, varnames)
-
-    # Get the values of the extra parameters in each transition.
-    extra_params, extra_values = Turing.Inference.get_transition_extras(ts)
-
-    # Extract names & construct param array.
-    nms = [varnames_symbol; extra_params]
-    parray = hcat(vals, extra_values)
-
-    # Get the average or final log evidence, if it exists.
-    le = getlogevidence(ts, spl, state)
-
-    # Set up the info tuple.
-    info = NamedTuple()
-
-    if include_varname_to_symbol
-        info = merge(info, (varname_to_symbol=OrderedDict(zip(varnames, varnames_symbol)),))
-    end
-
-    if save_state
-        info = merge(info, (model=model, sampler=spl, samplerstate=state))
-    end
-
-    # Merge in the timing info, if available
-    if !ismissing(stats)
-        info = merge(info, (start_time=stats.start, stop_time=stats.stop))
-    end
-
-    # Conretize the array before giving it to MCMCChains.
-    parray = MCMCChains.concretize(parray)
-
-    # Chain construction.
-    chain = MCMCChains.Chains(
-        parray,
-        nms,
-        (internals=extra_params,);
-        evidence=le,
-        info=info,
-        start=discard_initial + 1,
-        thin=thinning,
-    )
-
-    return sort_chain ? sort(chain) : chain
-end
+# function AbstractMCMC.bundle_samples(
+#     ts::Vector{<:DynamicPPL.ParamsWithStats},
+#     model::DynamicPPL.Model,
+#     spl::Bayes_AMGS_Sampler,
+#     state,
+#     chain_type::Type{MCMCChains.Chains};
+#     save_state=false,
+#     stats=missing,
+#     sort_chain=false,
+#     include_varname_to_symbol=true,
+#     discard_initial=0,
+#     thinning=1,
+#     kwargs...,
+# )
+#     # Convert transitions to array format.
+#     # Also retrieve the variable names.
+#     varnames, vals = _params_to_array(model, ts)
+#     varnames_symbol = map(Symbol, varnames)
+# 
+#     # Get the values of the extra parameters in each transition.
+#     extra_params, extra_values = Turing.Inference.get_transition_extras(ts)
+# 
+#     # Extract names & construct param array.
+#     nms = [varnames_symbol; extra_params]
+#     parray = hcat(vals, extra_values)
+# 
+#     # Get the average or final log evidence, if it exists.
+#     le = getlogevidence(ts, spl, state)
+# 
+#     # Set up the info tuple.
+#     info = NamedTuple()
+# 
+#     if include_varname_to_symbol
+#         info = merge(info, (varname_to_symbol=OrderedDict(zip(varnames, varnames_symbol)),))
+#     end
+# 
+#     if save_state
+#         info = merge(info, (model=model, sampler=spl, samplerstate=state))
+#     end
+# 
+#     # Merge in the timing info, if available
+#     if !ismissing(stats)
+#         info = merge(info, (start_time=stats.start, stop_time=stats.stop))
+#     end
+# 
+#     # Conretize the array before giving it to MCMCChains.
+#     parray = MCMCChains.concretize(parray)
+# 
+#     # Chain construction.
+#     chain = MCMCChains.Chains(
+#         parray,
+#         nms,
+#         (internals=extra_params,);
+#         evidence=le,
+#         info=info,
+#         start=discard_initial + 1,
+#         thin=thinning,
+#     )
+# 
+#     return sort_chain ? sort(chain) : chain
+# end

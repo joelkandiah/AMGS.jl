@@ -1,5 +1,6 @@
 working_dev/
 test/test.jl
 test/test2.jl
+test/performance_test.jl
 test/*.png
 .vscode/
