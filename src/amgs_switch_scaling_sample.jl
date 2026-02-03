@@ -373,6 +373,7 @@ function AbstractMCMC.step_warmup(
     model::AbstractMCMC.AbstractModel,
     spl::AMGS_SGS_Sampler;
     initial_params=Turing.Inference.init_strategy(spl),
+    discard_sample = false,
     kwargs...,
 )
 
@@ -409,8 +410,8 @@ function AbstractMCMC.step_warmup(
 
     # Check whether to accept the new parameters and return the previous transition if not
     accep = mh_accept_logdens(rng, lp_proposal, lp_old)
-
-    return accep ? new_state.transition : prev_transition, accep ? new_state : orig_state
+    return_transition = discard_sample ? nothing : (accep ? new_state.transition : prev_transition)
+    return return_transition, accep ? new_state : orig_state
 end
 
 """
@@ -430,6 +431,7 @@ function AbstractMCMC.step_warmup(
     model::AbstractMCMC.AbstractModel,
     spl::AMGS_SGS_Sampler,
     state::AMGSSGSState;
+    discard_sample = false,
     kwargs...
 )
     # Grab the VarInfo and logdensity of the current parameters
@@ -445,8 +447,8 @@ function AbstractMCMC.step_warmup(
 
     # Check whether to accept the new parameters and return the previous transition if not
     accep = mh_accept_logdens(rng, lp_proposal, lp_old)
-
-    return accep ? proposal_state.transition : state.transition, accep ? proposal_state : state
+    return_transition = discard_sample ? nothing : (accep ? proposal_state.transition : state.transition)
+    return return_transition, accep ? proposal_state : state
 end
 
 """
@@ -466,6 +468,7 @@ function AbstractMCMC.step(
     model::DynamicPPL.Model,
     spl::AMGS_SGS_Sampler;
     initial_params=Turing.Inference.init_strategy(spl),
+    discard_sample = false,
     kwargs...,
 )
     vis = DynamicPPL.VarInfo(model)
@@ -506,8 +509,8 @@ function AbstractMCMC.step(
     # Update the kernel and return the new transition and state
     prob = exp(min(0.0, (lp_proposal - lp_old)))
     _, upd_state = update_kernel(rng, accep ? proposal_state : orig_state, new_trans, spl, prob)
-    
-    return new_trans, upd_state
+    return_transition = discard_sample ? nothing : new_trans
+    return return_transition, upd_state
 end
 
 """
@@ -527,6 +530,7 @@ function AbstractMCMC.step(
     model::AbstractMCMC.AbstractModel,
     spl::AMGS_SGS_Sampler,
     state::AMGSSGSState;
+    discard_sample = false,
     kwargs...
 )
     vis = state.varinfo
@@ -544,7 +548,8 @@ function AbstractMCMC.step(
     # Update the kernel and return the new transition and state
     prob = exp(min(0.0, (lp_proposal - lp_old)))
     _, new_state = update_kernel(rng, accep ? proposal_state : state, new_trans, spl, prob)
-    return new_trans, new_state
+    return_transition = discard_sample ? nothing : new_trans
+    return return_transition, new_state
 end
 
 

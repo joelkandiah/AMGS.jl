@@ -23,16 +23,6 @@ using AMGS
 # chain = sample(model, sampler, 1000)
 ```
 
-Notes and TODOs
-- Many docstrings in the individual sampler files include TODO placeholders
-	where more mathematical detail and algorithm references should be added.
-	Please expand the algorithm description below and in the function-level
-	docstrings where indicated.
-
-Algorithm / background (fill in)
-- [x] Add a brief description of the adaptive algorithm, reference papers,
-	and the meaning of the parameters `acceptance_rate`, `convergence_step`,
-	`noise_scaling` and `use_noise_stabiliser`.
 """
 
 module AMGS
@@ -58,7 +48,7 @@ using LoopVectorization
 export step, step_warmup, bundle_samples, isgibbscomponent, drop_space, setparams!!, get_varinfo, _add_noise!
 
 # Functions which use a few different MH samplers
-export AMGS_Sampler, AMGS_DA_Sampler, AMGS_Tempered_Sampler, AMGS_Stopping_Sampler, AMGS_Stopping_Tempered_Sampler, RAM_Sampler, Bayes_AMGS_Sampler, DRAMGS_Sampler, new_AMGS_Sampler, AMGS_SGS_Sampler 
+export AMGS_Sampler, AMGS_DA_Sampler, AMGS_Tempered_Sampler, AMGS_Stopping_Sampler, AMGS_Stopping_Tempered_Sampler, RAM_Sampler, Bayes_AMGS_Sampler, AMGS_SGS_Sampler 
 
 const PROGRESS = Ref(true)
 # Utility functions borrowed from Turing packages (credit their code)
@@ -71,8 +61,6 @@ include("amgs_tempered_sample.jl")
 include("amgs_tempered_stopping_sample.jl")
 include("amgs_DA_sample.jl")
 include("amgs_switch_scaling_sample.jl")
-#include("pre-release/dr_amgs_sample.jl")
-#include("pre-release/new_amgs_sample.jl")
 include("ram_sample.jl")
 include("bayes_amgs_sample.jl")
 

@@ -312,6 +312,7 @@ function AbstractMCMC.step_warmup(
     model::DynamicPPL.Model,
     spl::Bayes_AMGS_Sampler;
     initial_params = Turing.Inference.init_strategy(spl),
+    discard_sample = false,
     kwargs...,
 )
 
@@ -355,8 +356,8 @@ function AbstractMCMC.step_warmup(
 
     # Check whether to accept the new parameters
     accep = mh_accept_logdens(rng, lp_proposal, lp_old)
-
-    return accep ? proposal_state.transition : prev_transition, accep ? proposal_state : orig_state
+    return_transition = discard_sample ? nothing : (accep ? proposal_state.transition : prev_transition)
+    return return_transition, accep ? proposal_state : orig_state
 end
 
 """
@@ -376,6 +377,7 @@ function AbstractMCMC.step_warmup(
     model::DynamicPPL.Model,
     spl::Bayes_AMGS_Sampler,
     state::BayesAMGSState;
+    discard_sample = false,
     kwargs...
 )
     # Grab the VarInfo and logdensity of the current parameters
@@ -399,8 +401,8 @@ function AbstractMCMC.step_warmup(
     # Create a new transition and state object if accepted
     #trans = DynamicPPL.ParamsWithStats(vis, lp_proposal, true)
     #new_state = BayesAMGSState(trans, state.μ, state.kernel, state.step, state.λ, state.λ_start, state.n_start, state.A, state.δ, state.d, state.c, state.vec_X)
-
-    return accep ? proposal_state.transition : state.transition, accep ? proposal_state : state 
+    return_transition = discard_sample ? nothing : (accep ? proposal_state.transition : state.transition)
+    return return_transition, accep ? proposal_state : state 
 end
 
 """
@@ -420,6 +422,7 @@ function AbstractMCMC.step(
     model::DynamicPPL.Model,
     spl::Bayes_AMGS_Sampler;
     initial_params = Turing.Inference.init_strategy(spl),
+    discard_sample = false,
     kwargs...,
 )
     vis = DynamicPPL.VarInfo(model)
@@ -451,7 +454,7 @@ function AbstractMCMC.step(
 
     # Create the initial transition object
     prev_transition = DynamicPPL.ParamsWithStats(vis, model, nothing)
-    new_state = init_BayesAMGSState(prev_transition, vis, theta, S, n_start, A, δ, d, c)
+    orig_state = init_BayesAMGSState(prev_transition, vis, theta, S, n_start, A, δ, d, c)
 
     proposal_state = propose_BayesAMGSLL(rng, vis, model, spl, orig_state, c * S)
     lp_proposal = proposal_state.logjoint_internal
@@ -461,8 +464,8 @@ function AbstractMCMC.step(
     new_trans = accep ? proposal_state : prev_transition
     prob = exp(min(0.0,-(lp_proposal - lp_old)))
     upd_state = update_kernel(rng, accep ? proposal_state : orig_state, new_trans, spl, prob)
-
-    return new_trans, upd_state
+    return_transition = discard_sample ? nothing : new_trans
+    return return_transition, upd_state
 end
 
 """
@@ -482,6 +485,7 @@ function AbstractMCMC.step(
     model::DynamicPPL.Model,
     spl::Bayes_AMGS_Sampler,
     state::BayesAMGSState;
+    discard_sample = false,
     kwargs...,
 )
     vis = state.varinfo
@@ -496,8 +500,8 @@ function AbstractMCMC.step(
 
     prob = exp(min(0.0,(lp_proposal - lp_old)))
     new_state = update_kernel(rng, state, new_trans, spl, prob)
-
-    return new_trans, new_state
+    return_transition = discard_sample ? nothing : new_trans
+    return return_transition, new_state
 end
 
 #function DynamicPPL.assume(
