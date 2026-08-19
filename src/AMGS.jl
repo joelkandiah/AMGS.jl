@@ -31,28 +31,21 @@ using Turing
 using AbstractMCMC
 using Random
 using DynamicPPL
+using Distributions
 using LinearAlgebra
-using BangBang
-using Accessors
-using MCMCChains
-using OrderedCollections
+using LogDensityProblems
 using DataStructures
-using LoopVectorization
 
 
-#TODO: Resolve the in place operations in the code (BangBang.jl)
-#TODO: Resolve the type instability in the code
-#TODO: Extend these samplers to use the Gibbs sampling style mechanism for block samplers (want to wrap these samplers)
-#TODO: Convert the stopping sampler into a wrapper for the other adaptive samplers (it ony really needs the computed acceptance rate and the state from the returns from each step so perhaps just a wrapper on the step function)
-# TODO update the documenting comments
-export step, step_warmup, bundle_samples, isgibbscomponent, drop_space, setparams!!, get_varinfo, _add_noise!
+# TODO: Convert the stopping sampler into a wrapper for the other adaptive
+#       samplers -- it only needs the computed acceptance rate and the state
+#       returned from each step, so it could wrap `step` generically.
+export AMGS_Sampler, AMGS_Stopping_Sampler, AMGS_Tempered_Sampler, AMGS_Stopping_Tempered_Sampler, AMGS_DA_Sampler, AMGS_SGS_Sampler, RAM_Sampler, Bayes_AMGS_Sampler
 
-# Functions which use a few different MH samplers
-export AMGS_Sampler, AMGS_DA_Sampler, AMGS_Tempered_Sampler, AMGS_Stopping_Sampler, AMGS_Stopping_Tempered_Sampler, RAM_Sampler, Bayes_AMGS_Sampler, AMGS_SGS_Sampler 
 
-const PROGRESS = Ref(true)
 # Utility functions borrowed from Turing packages (credit their code)
 include("utils.jl")
+include("shared.jl")
 
 # Code for each differnt sampler
 include("amgs_sample.jl")

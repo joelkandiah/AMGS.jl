@@ -1,264 +1,111 @@
 """
-    set_namedtuple!(vi, nt)
+utils.jl
 
-Populate a `DynamicPPL.VarInfo` (or ThreadSafeVarInfo) `vi` from a `NamedTuple` of
-parameter arrays `nt`.
+Shared helpers for the AMGS samplers: random-walk proposals and
+Metropolis-Hastings acceptance rules.
 
-# Arguments
-- `vi::DynamicPPL.VarInfoOrThreadSafeVarInfo`: the VarInfo object to modify in-place.
-- `nt::NamedTuple`: mapping from variable names to values (vectors or scalars).
-
-# Notes
-- If a named entry corresponds to multiple internal variable names, the values are
-  spread across them. If lengths mismatch, an error is thrown.
-
-TODO: Add an example showing typical `nt` shapes for hierarchical models.
+All of these operate on the *linked* (unconstrained, real-valued) parameter
+vector — every sampler in this package is a form of random-walk Metropolis, so
+the parameters must live in ℝⁿ. Constrained model parameters are transformed
+before they reach these functions, and the accompanying log-Jacobian is carried
+in the target density (`getlogjoint_internal`).
 """
-function set_namedtuple!(vi::DynamicPPL.VarInfoOrThreadSafeVarInfo, nt::NamedTuple)
-    for (n, vals) in pairs(nt)
-        vns = vi.metadata[n].vns
-        if vals isa AbstractVector
-            vals = unvectorize(vals)
-        end
-        if length(vns) == 1
-            # Only one variable, assign the values to it
-            DynamicPPL.setindex!(vi, vals, vns[1])
-        else
-            # Spread the values across the variables
-            length(vns) == length(vals) || error("Unequal number of variables and values")
-            for (vn, val) in zip(vns, vals)
-                DynamicPPL.setindex!(vi, val, vn)
-            end
-        end
-    end
-end
 
-# Define a function which proposes a new set of parameters
 """
     proposewalk(rng, θ, Σ)
 
-Draw a Multivariate Normal proposal centered at `θ` with covariance `Σ`.
+Draw a Gaussian random-walk proposal centred at `θ` with covariance `Σ`.
 
-# Arguments
-- `rng::Random.AbstractRNG`: random number generator.
-- `θ::AbstractVector`: current parameter vector (proposal mean).
-- `Σ::AbstractMatrix`: covariance matrix for the proposal.
+Samples via the Cholesky factor directly (`θ + L z`, `Σ = L Lᵀ`) rather than
+constructing an `MvNormal`, which avoids allocating a distribution object on
+every call.
 
-# Returns
-- A vector containing the proposed parameters.
+Returns the proposed parameter vector.
 """
 function proposewalk(rng::Random.AbstractRNG, θ::AbstractVector, Σ::AbstractMatrix)
-    # Optimized: use direct Cholesky sampling instead of MvNormal constructor
-    # This avoids allocating a new distribution object on every call
-    n = length(θ)
-    z = randn(rng, n)
     L = cholesky(Symmetric(Σ)).L
-    return θ .+ L * z
+    return θ .+ L * randn(rng, length(θ))
 end
 
-# Overload for pre-factorized covariance (for caching scenarios)
+"""
+    proposewalk(rng, θ, L::LowerTriangular)
+
+Overload for a pre-computed Cholesky factor, for callers that cache the
+factorisation across steps.
+"""
 function proposewalk(rng::Random.AbstractRNG, θ::AbstractVector, L::LowerTriangular)
-    # When Cholesky factorization is pre-computed and cached
-    n = length(θ)
-    z = randn(rng, n)
-    return θ .+ L * z
+    return θ .+ L * randn(rng, length(θ))
 end
 
-# Define a function which proposes a new set of parameters
 """
     proposewalkram(rng, θ, S)
 
-RAM-style proposal: sample a standard normal `U` and return `(θ + S*U, U)`.
+Robust Adaptive Metropolis (RAM) proposal: draw `U ~ N(0, I)` and return
+`(θ + S U, U)`.
 
-# Arguments
-- `rng::Random.AbstractRNG`: random number generator.
-- `θ::AbstractVector`: current parameter vector.
-- `S::LowerTriangular`: (Cholesky-like) factor such that Σ = S*S'.
-
-# Returns
-- `(proposal, U)` where `proposal` is the proposed parameter vector and `U` is
-  the standard normal vector used to generate it. The returned `U` can be used
-  for reversible jump / RAM adjustments.
+`S` is the lower-triangular factor with `Σ = S Sᵀ`. The standard normal draw `U`
+is returned alongside the proposal because the RAM rank-one update of `S`
+(Vihola, 2012) is expressed in terms of `U`, not the proposal itself.
 """
 function proposewalkram(rng::Random.AbstractRNG, θ::AbstractVector, S::LowerTriangular)
-    # Optimized: avoid allocating zeros vector and use randn directly
     U = randn(rng, length(θ))
     return θ + S * U, U
 end
 
-# Write a function which checks whether to accept a new set of parameters
 """
-        mh_accept_logdens(rng, s_prime, s)
+    mh_accept_logdens(rng, s_prime, s)
 
-Decide whether to accept a Metropolis-Hastings proposal given log-densities.
+Metropolis acceptance test for a **symmetric** proposal, given the target
+log-densities `s_prime = log π(θ')` and `s = log π(θ)`.
 
-# Arguments
-- `rng::AbstractRNG`: random number generator.
-- `s_prime::Real`: proposed log-density (log π(x')).
-- `s::Real`: current log-density (log π(x)).
+Accepts with probability `min(1, exp(s_prime - s))`, implemented as
+`-Exp(1) < min(0, Δ)`. The upper clamp is written as `1e-6` rather than `0`;
+since `-randexp(rng)` is always strictly negative this is numerically identical
+to clamping at `0` (any `Δ > 0` accepts with probability 1) while avoiding a
+branch on the exact-zero case.
 
-# Returns
-- `Bool` indicating whether to accept the proposal.
-
-# Notes
-- Uses the `-randexp(rng) < min(1e-6, s_prime - s)` trick present in the
-    original code. Consider replacing `1e-6` with `0.0` if numerical behaviour is
-    acceptable — the current cutoff appears to guard against extreme values.
+Returns `true` to accept the proposal.
 """
-mh_accept_logdens(rng::T, s_prime::T2, s::T2) where {T <:AbstractRNG, T2 <: Real} = -randexp(rng) < min(1e-6, s_prime - s)
+function mh_accept_logdens(rng::AbstractRNG, s_prime::Real, s::Real)
+    return -randexp(rng) < min(1e-6, s_prime - s)
+end
 
-# function mh_accept_tempered(
-#     rng::AbstractRNG,
-#     prop_varinfo::DynamicPPL.VarInfoOrThreadSafeVarInfo,
-#     curr_varinfo::DynamicPPL.VarInfoOrThreadSafeVarInfo,
-#     temp::Real,
-# )   
-#     logprior_prop= DynamicPPL.getlogprior(prop_varinfo)
-#     logprior_curr= DynamicPPL.getlogprior(curr_varinfo)
-# 
-#     loglik_prop = DynamicPPL.getloglikelihood(prop_varinfo)
-#     loglik_curr = DynamicPPL.getloglikelihood(curr_varinfo)
-# 
-#     logjac_prop = DynamicPPL.getlogjac(prop_varinfo)
-#     logjac_curr = DynamicPPL.getlogjac(curr_varinfo)
-# 
-#     # tempered log posterior for proposal and current
-#     logπ_prop = logprior_prop + temp * loglik_prop + logjac_prop
-#     logπ_curr = logprior_curr + temp * loglik_curr + logjac_curr
-# 
-#     Δ = logπ_prop - logπ_curr
-# 
-#     # accept if log(u) < min(0, Δ)
-#     accep = -randexp(rng) < min(1e-6, Δ)
-#     return accep, accep ? logπ_prop : logπ_curr
-# end
-
-# Write a function which checks whether to accept a new set of parameters dr??
 """
     mh_dr_accept_logdens(rng, s_prime, s, s0)
 
-Delayed-rejection acceptance logic operating on log-densities `s_prime`,
-`s` and `s0` (log π(x'), log π(x), log π(x0)).
+Delayed-rejection (second-stage) acceptance test.
 
-# Returns
-- `(prob, accept)` where `prob` is a computed acceptance probability scalar
-  (in some branches it may be 0 or 1) and `accept` is a Bool indicating
-  whether the current RNG draw accepts the delayed-rejection step.
+Given the log-densities of the second-stage proposal (`s_prime`), the current
+state (`s`) and the already-rejected first-stage proposal (`s0`), the standard
+delayed-rejection acceptance probability for symmetric proposals (Mira, 2001;
+Tierney & Mira, 1999) is
 
-TODO: Add mathematical explanation and references for these computations.
+    α₂ = min(1, [π(θ') - π(θ₀')] / [π(θ) - π(θ₀')])
+
+where the bracketed differences are on the *density* scale and account for the
+fact that the first-stage proposal was rejected.
+
+Returns `(prob, accept)`, with `prob` the acceptance probability and `accept`
+the realised decision.
+
+!!! warning
+    The differences are formed by exponentiating the log-densities, so this is
+    prone to overflow/underflow for log-densities of large magnitude. It is only
+    used by the pre-release delayed-rejection sampler.
 """
-function mh_dr_accept_logdens(rng::T, s_prime::T2, s::T2, s0::T2) where {T <:AbstractRNG, T2 <: Real} 
+function mh_dr_accept_logdens(rng::AbstractRNG, s_prime::Real, s::Real, s0::Real)
     diff_delay_ll = exp(s_prime) - exp(s)
     diff_last_delay_ll = exp(s0) - exp(s)
     final_diff = exp(s_prime) - exp(s0)
-    if(final_diff > 0)
+    if final_diff > 0
         return 1, true
     end
-    if(diff_delay_ll < 0)
+    if diff_delay_ll < 0
         return 0, false
-    end 
-    if(diff_last_delay_ll < 0)
+    end
+    if diff_last_delay_ll < 0
         return 1, true
     end
-    prob = exp(log(diff_delay_ll) - log(diff_last_delay_ll))
-    return  prob, -randexp(rng) < min(1e-6, log(diff_delay_ll) - log(diff_last_delay_ll))
+    logratio = log(diff_delay_ll) - log(diff_last_delay_ll)
+    return exp(logratio), -randexp(rng) < min(1e-6, logratio)
 end
-
-"""
-    getparams(model, t)
-
-Return the parameter vector `θ` stored in the transition `t`.
-
-This wrapper exists for compatibility with different versions/representations
-of transition objects; it simply returns `t.θ` by default.
-"""
-function getparams(model::DynamicPPL.Model, t)
-    return t.θ
-end
-
-"""
-    _params_to_array(model, ts)
-
-Convert a vector of transitions `ts` into a tuple `(names, vals)` where
-`names` is an ordered collection of `VarName`s and `vals` is a matrix-like
-collection of values (compatible with MCMCChains.jl).
-
-This function uses `DynamicPPL.varname_and_value_leaves` to flatten structured
-parameters into individual scalar entries so downstream tools can consume them.
-
-TODO: Add an example showing how hierarchical parameter names are flattened.
-"""
-function _params_to_array(model::DynamicPPL.Model, ts::Vector)
-    names_set = OrderedSet{VarName}()
-    # Extract the parameter names and values from each transition.
-    dicts = map(ts) do t
-        # In general getparams returns a dict of VarName => values. We need to also
-        # split it up into constituent elements using
-        # `DynamicPPL.varname_and_value_leaves` because otherwise MCMCChains.jl
-        # won't understand it.
-        vals = getparams(model, t)
-        nms_and_vs = if isempty(vals)
-            Tuple{VarName,Any}[]
-        else
-            iters = map(DynamicPPL.varname_and_value_leaves, keys(vals), values(vals))
-            mapreduce(collect, vcat, iters)
-        end
-        nms = map(first, nms_and_vs)
-        vs = map(last, nms_and_vs)
-        for nm in nms
-            push!(names_set, nm)
-        end
-        # Convert the names and values to a single dictionary.
-        return OrderedDict(zip(nms, vs))
-    end
-    names = collect(names_set)
-    vals = [get(dicts[i], key, missing) for i in eachindex(dicts), key in names]
-
-    return names, vals
-end
-
-
-struct AMGSContext{R<:AbstractRNG} <: DynamicPPL.AbstractContext
-    rng::R
-end
-
-function DynamicPPL.tilde_assume!!(
-    context::AMGSContext, right::Distribution, vn::VarName, vi::AbstractVarInfo
-)
-    # Allow MH to sample new variables from the prior if it's not already present in the
-    # VarInfo.
-    dispatch_ctx = if haskey(vi, vn)
-        DynamicPPL.DefaultContext()
-    else
-        DynamicPPL.InitContext(context.rng, DynamicPPL.InitFromPrior())
-    end
-    return DynamicPPL.tilde_assume!!(dispatch_ctx, right, vn, vi)
-end
-
-function DynamicPPL.tilde_observe!!(
-    ::AMGSContext, right::Distribution, left, vn::Union{VarName,Nothing}, vi::AbstractVarInfo
-)
-    return DynamicPPL.tilde_observe!!(DefaultContext(), right, left, vn, vi)
-end
-
-
-# function _params_to_array(model::DynamicPPL.Model, ts::Vector)
-#     names_set = OrderedSet{VarName}()
-#     # Extract the parameter names and values from each transition.
-#     dicts = map(ts) do t
-#         nms_and_vs = Turing.Inference.getparams(model, t.params)
-#         nms = map(first, nms_and_vs)
-#         vs = map(last, nms_and_vs)
-#         for nm in nms
-#             push!(names_set, nm)
-#         end
-#         # Convert the names and values to a single dictionary.
-#         return OrderedDict(zip(nms, vs))
-#     end
-#     names = collect(names_set)
-#     vals = [
-#         get(dicts[i], key, missing) for i in eachindex(dicts), (j, key) in enumerate(names)
-#     ]
-# 
-#     return names, vals
-# end

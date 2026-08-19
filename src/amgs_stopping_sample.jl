@@ -1,10 +1,57 @@
-# write a functions step and step_warmup which are used in the AMGS_Stopping_Sampler.
-# Write code based on algorithm 4 in https://link.springer.com/article/10.1007/s11222-008-9110-y combined with the extensions in the appendix of https://arxiv.org/abs/2408.04178 (note appendix to be published soon)
+"""
+amgs_stopping_sample.jl
 
-# Start by defining the sampler
-# Note added the stopping conditions as parameters to the sampler
-# The max number of steps where adaptation occurs, the lower and upper bounds of the acceptance rate to check at each average interval
-struct AMGS_Stopping_Sampler{T_accep <: Real, T_conv_step <: Real, T_adapt_period <: Integer, T_accep_l <: Real, T_accep_u <: Real, T_accep_interval <: Integer, T_scale <: Real} <: AbstractMCMC.AbstractSampler
+AMGS with a **stopping rule** for the adaptation.
+
+This is Algorithm 4 of Andrieu & Thoms (2008) combined with the stopping
+extension in the appendix of https://arxiv.org/abs/2408.04178.
+
+Ordinary AMGS adapts forever, with the Robbins–Monro gain decaying as
+`(t+1)^-γ`. That is asymptotically valid but means the chain is never exactly
+Markov. This variant instead *freezes* the proposal once it is judged good
+enough: the realised acceptance rate is averaged over blocks of
+`average_interval` iterations, and as soon as that block average falls inside
+`(lower_stopping_accep, upper_stopping_accep)` — or `max_adapt_period` is
+exhausted — adaptation stops for good and the kernel becomes a fixed,
+genuinely Markov random-walk Metropolis kernel.
+
+Note the adaptation is applied *per block* rather than per iteration: the
+Robbins–Monro update fires only at block boundaries, which is what makes the
+block-averaged acceptance rate a meaningful stopping statistic.
+"""
+
+"""
+    AMGS_Stopping_Sampler(acceptance_rate, convergence_step, max_adapt_period,
+                          lower_stopping_accep, upper_stopping_accep, average_interval)
+
+AMGS sampler that stops adapting once its acceptance rate settles.
+
+# Fields
+- `acceptance_rate::Real`: target acceptance rate for the scale adaptation.
+- `convergence_step::Real`: Robbins–Monro decay exponent `γ`.
+- `max_adapt_period::Integer`: hard cap on adaptation steps; `-1` disables the
+  cap and relies solely on the acceptance-rate criterion.
+- `lower_stopping_accep::Real`, `upper_stopping_accep::Real`: the acceptance-rate
+  window that, once the block average lands inside it, freezes the adaptation.
+- `average_interval::Integer`: block length over which the acceptance rate is
+  averaged, and the period at which the kernel is updated.
+- `use_noise_stabiliser::Bool`, `noise_scaling::Real`: optional covariance
+  noise stabiliser (see [`add_noise!`](@ref)).
+
+# Example
+```julia
+spl = AMGS_Stopping_Sampler(0.234, 0.6, 10_000, 0.15, 0.35, 100)
+```
+"""
+struct AMGS_Stopping_Sampler{
+    T_accep<:Real,
+    T_conv_step<:Real,
+    T_adapt_period<:Integer,
+    T_accep_l<:Real,
+    T_accep_u<:Real,
+    T_accep_interval<:Integer,
+    T_scale<:Real,
+} <: AbstractMCMC.AbstractSampler
     acceptance_rate::T_accep
     convergence_step::T_conv_step
     max_adapt_period::T_adapt_period
@@ -15,679 +62,462 @@ struct AMGS_Stopping_Sampler{T_accep <: Real, T_conv_step <: Real, T_adapt_perio
     noise_scaling::T_scale
 end
 
-"""
-    AMGS_Stopping_Sampler(acceptance_rate, convergence_step, max_adapt_period, lower_stopping_accep, upper_stopping_accep, average_interval)
-
-Construct an `AMGS_Stopping_Sampler` object.
-
-# Arguments
-- `acceptance_rate::Real`: The target acceptance rate.
-- `convergence_step::Real`: A tuning parameter for convergence/step size.
-- `max_adapt_period::Integer`: The maximum adaptation period.
-- `lower_stopping_accep::Real`: The lower bound for stopping acceptance rate.
-- `upper_stopping_accep::Real`: The upper bound for stopping acceptance rate.
-- `average_interval::Integer`: The interval for averaging acceptance rates.
-
-# Returns
-An `AMGS_Stopping_Sampler` instance with `use_noise_stabiliser = false` and `noise_scaling = 1e-6`.
-"""
 function AMGS_Stopping_Sampler(
     acceptance_rate::T1,
     convergence_step::T2,
     max_adapt_period::T3,
     lower_stopping_accep::T4,
     upper_stopping_accep::T5,
-    average_interval::T6;
-) where {T1 <: Real, T2 <: Real, T3 <: Integer, T4 <: Real, T5 <: Real, T6 <: Integer}
-    return AMGS_Stopping_Sampler{T1, T2, T3, T4, T5, T6, Float64}(acceptance_rate, convergence_step, max_adapt_period, lower_stopping_accep, upper_stopping_accep, average_interval, false, 1e-6)
+    average_interval::T6,
+) where {T1<:Real,T2<:Real,T3<:Integer,T4<:Real,T5<:Real,T6<:Integer}
+    average_interval > 0 || throw(ArgumentError("average_interval must be positive"))
+    lower_stopping_accep < upper_stopping_accep ||
+        throw(ArgumentError("lower_stopping_accep must be below upper_stopping_accep"))
+    return AMGS_Stopping_Sampler{T1,T2,T3,T4,T5,T6,Float64}(
+        acceptance_rate,
+        convergence_step,
+        max_adapt_period,
+        lower_stopping_accep,
+        upper_stopping_accep,
+        average_interval,
+        false,
+        1e-6,
+    )
 end
 
-# DynamicPPL.default_chain_type(sampler::AMGS_Stopping_Sampler) = MCMCChains.Chains
-
-# Define the state of the sampler
-# Contains Important quantities for computation of the updated kernel
-# In addition to the AMGSState, we also store the previous accepts as well as whether to adaptation has ended
 """
-    AMGSStoppingState{TTrans<:DynamicPPL.ParamsWithStats, Tμ<:Vector, TKernel<:Matrix, TStep<:Integer, Tβ<:Real, TΔi<:Vector}
+    AMGSStoppingState
 
-The state object for the AMGS Stopping sampler.
+State for [`AMGS_Stopping_Sampler`](@ref).
 
-# Fields
-- `transition::TTrans`: The current transition object.
-- `varinfo::TVI`: The variable information.
-- `μ::Tμ`: The current mean vector of the target distribution.
-- `kernel::TKernel`: The current covariance kernel.
-- `step::TStep`: The current step number.
-- `β::Tβ`: The global scale parameter.
-- `Δi::TΔi`: The vector of recent acceptance values.
-- `stopped::Bool`: Whether the adaptation process has stopped.
-- `logjoint_internal::TL`: The cached log joint density.
-- `mean_accep::TAccep`: Running average of acceptance rates for stopping criteria.
-- `μ_running_avg::Tμ`: Running average of parameter means for convergence monitoring.
-- `kernel_running_calc::TKernel`: Running covariance calculation for numerical stability.
+Extends the base AMGS state with the bookkeeping needed by the stopping rule.
+
+# Additional fields
+- `stopped::Bool`: once true, the proposal is frozen and no further adaptation
+  occurs.
+- `mean_accep`: acceptance rate accumulated over the current block; reset at
+  each kernel update.
+- `μ_running_avg`, `kernel_running_calc`: within-block running mean and
+  covariance maintained by Welford's online algorithm.
+
+!!! note
+    `μ_running_avg` / `kernel_running_calc` are maintained as block diagnostics
+    but are *not* consumed by [`update_kernel!`](@ref), which adapts from the
+    instantaneous position, matching the original implementation.
 """
 struct AMGSStoppingState{
+    TLDF<:DynamicPPL.LogDensityFunction,
     TTrans<:DynamicPPL.ParamsWithStats,
-    TVI<:AbstractVarInfo,
-    Tμ<:Vector,
-    TKernel<:Matrix,
+    Tθ<:AbstractVector,
+    TKernel<:AbstractMatrix,
     TStep<:Integer,
     Tβ<:Real,
-    TΔi<:Vector,
     TL<:Real,
     TAccep<:Real,
-}
+} <: AbstractAMGSState
+    ldf::TLDF
     transition::TTrans
-    varinfo::TVI
-    μ::Tμ
+    θ::Tθ
+    logp::TL
+    μ::Tθ
     kernel::TKernel
     step::TStep
     β::Tβ
-    Δi::TΔi
     stopped::Bool
-    logjoint_internal::TL
     mean_accep::TAccep
-    μ_running_avg::Tμ
+    μ_running_avg::Tθ
     kernel_running_calc::TKernel
+    Δ_cache::Tθ
+    θ_prop::Tθ
+    z_cache::Tθ
 end
 
-# Define the initial state of the sampler
 """
-    init_AMGSStoppingState(transition, μ, kernel, sampler)
+    init_AMGSStoppingState(ldf, transition, θ, logp, kernel)
 
-Initialize the `AMGSStoppingState` object.
-
-# Arguments
-- `transition::DynamicPPL.ParamsWithStats`: The initial transition object.
-- `μ::Vector{<:Real}`: The initial mean vector.
-- `kernel::Matrix{<:Real}`: The initial kernel matrix.
-- `sampler::AMGS_Stopping_Sampler`: The AMGS Stopping sampler.
-
-# Returns
-An `AMGSStoppingState` instance.
+Build the initial stopping state, allocating every buffer once.
 """
 function init_AMGSStoppingState(
-    transition::T_trans,
-    varinfo::TVI,
-    μ::Vector{T_μ},
-    kernel::T_kernel,
-    sampler::AMGS_Stopping_Sampler
-) where {T_trans <: DynamicPPL.ParamsWithStats, TVI <: AbstractVarInfo, T_μ <: Real, T_kernel <: Matrix}
-    ## copy vector length of mu and initialise zero vector for beta
-    step = 0
-    β = zero(eltype(μ))
-    Δi = zeros(eltype(μ), sampler.average_interval)
-    lp = DynamicPPL.getlogjoint_internal(varinfo)
-    AMGSStoppingState{T_trans, TVI, Vector{T_μ}, T_kernel, Int, typeof(β), typeof(Δi), typeof(lp), Float64}(transition, varinfo, μ, kernel, step, β, Δi, false, lp, 0.0, μ, zero(kernel))
+    ldf::DynamicPPL.LogDensityFunction,
+    transition::DynamicPPL.ParamsWithStats,
+    θ::AbstractVector,
+    logp::Real,
+    kernel::AbstractMatrix,
+)
+    return AMGSStoppingState(
+        ldf,
+        transition,
+        θ,
+        logp,
+        copy(θ),            # μ
+        kernel,
+        1,                  # step (never 0: η = (step+1)^-γ must stay below 1)
+        zero(eltype(θ)),    # β
+        false,              # stopped
+        0.0,                # mean_accep
+        copy(θ),            # μ_running_avg (own storage; must not alias μ)
+        zero(kernel),       # kernel_running_calc
+        similar(θ),
+        similar(θ),
+        similar(θ),
+    )
 end
 
-# Define the initial state of the sampler in a 1D case
 """
-    init_AMGSStoppingState(transition, μ, kernel, sampler)
+    update_kernel!(rng, state, spl, prob)
 
-Initialize the `AMGSStoppingState` object for a 1D case.
+Robbins–Monro update of mean, covariance and global scale — identical in form to
+the base AMGS update, but fired once per `average_interval` block rather than
+every iteration.
 
-# Arguments
-- `transition::DynamicPPL.ParamsWithStats`: The initial transition object.
-- `μ::Real`: The initial mean value.
-- `kernel::Matrix{<:Real}`: The initial kernel matrix.
-- `sampler::AMGS_Stopping_Sampler`: The AMGS Stopping sampler.
+    μ ← μ + η(θ - μ),  Σ ← Σ + η((θ-μ)(θ-μ)ᵀ - Σ),  β ← β + η(α - α*)
 
-# Returns
-An `AMGSStoppingState` instance.
+Returns `(Σ, β)`; `μ` and `Σ` are mutated in place.
 """
-function init_AMGSStoppingState(
-    transition::T_trans,
-    varinfo::TVI,
-    μ::T_μ,
-    kernel::T_kernel,
-    sampler::AMGS_Stopping_Sampler
-) where {T_trans <: DynamicPPL.ParamsWithStats, TVI <: AbstractVarInfo, T_μ <: Real, T_kernel <: Matrix}
-    ## copy vector length of mu and initialise zero vector for beta
-    step = 0
-    β = zero(typeof(μ))
-    new_μ = [μ]
-    Δi = zeros(typeof(μ), sampler.average_interval)
-    lp = DynamicPPL.getlogjoint_internal(varinfo)
-    AMGSStoppingState{T_trans, TVI, typeof(new_μ), T_kernel, Int, typeof(β),typeof(Δi), typeof(lp), Float64}(transition, varinfo, new_μ, kernel, step, β, Δi, false, lp, 0.0, new_μ, zero(kernel))
-end
-
-# Write a function which updates the kernel
-"""
-    update_kernel(rng, state, trans, spl, prob)
-
-Update the kernel matrix, mean vector, and other internal quantities of the `AMGSStoppingState`.
-
-# Arguments
-- `state::AMGSStoppingState`: The current state of the sampler.
-- `trans::DynamicPPL.ParamsWithStats`: The new transition object.
-- `spl::AMGS_Stopping_Sampler`: The AMGS Stopping sampler.
-- `prob::Real`: The acceptance probability.
-
-# Returns
-A new `AMGSStoppingState` with updated quantities.
-"""
-function update_kernel(rng::TRNG, state::AMGSStoppingState, trans::T, spl::AMGS_Stopping_Sampler, prob::T3) where {T <: DynamicPPL.ParamsWithStats, T3 <: Real, TRNG <: AbstractRNG}
-    # Grab useful quantities from the state
-    Σ = state.kernel
+function update_kernel!(
+    rng::AbstractRNG, state::AMGSStoppingState, spl::AMGS_Stopping_Sampler, prob::Real
+)
     μ = state.μ
-    step = state.step
-    β = state.β
+    Σ = state.kernel
+    Δ = state.Δ_cache
+    n = length(Δ)
 
-    # Follow maths from arXiv paper to update the kernel and the global scale β
-    η = (step + 1.0)^(-spl.convergence_step)
-    β = β + η * (prob - spl.acceptance_rate)
-    Δ = state.varinfo[:] - μ
-    μ = (1.0 - η) * μ + (η * state.varinfo[:])
-    
-    # Add noise to the kernel if requested
-    noise_term = spl.use_noise_stabiliser * spl.noise_scaling * η * rand(rng, size(Δ)[1])
-    Σ = (1.0 - η) * Σ + (η * (Δ * (Δ'))) + diagm(noise_term)
-    
-    # Reset the running covariance and mean calculation
-    new_state = AMGSStoppingState(trans, state.varinfo, μ, Σ, step + 1, β, state.Δi, state.stopped, state.logjoint_internal, 0.0, zero(μ), zero(Σ))
-    return new_state
+    @fastmath begin
+        η = (state.step + 1.0)^(-spl.convergence_step)
+        β = state.β + η * (prob - spl.acceptance_rate)
+
+        # Residual against the mean *before* it is updated, then advance the
+        # mean -- the ordering specified in the AMGS pseudocode (Algorithm 1)
+        # and Andrieu & Thoms Algorithm 4. See `update_kernel!` in
+        # amgs_sample.jl for the full recursion.
+        @inbounds @simd for i in 1:n
+            Δ[i] = state.θ[i] - μ[i]
+        end
+        @inbounds @simd for i in 1:n
+            μ[i] += η * Δ[i]
+        end
+        @inbounds for i in 1:n
+            Δi = Δ[i]
+            for j in i:n
+                Σ[i, j] += η * (Δi * Δ[j] - Σ[i, j])
+                Σ[j, i] = Σ[i, j]
+            end
+        end
+        add_noise!(rng, Σ, spl.noise_scaling, n, spl.use_noise_stabiliser)
+    end
+
+    return Σ, β
 end
 
-# Function to check whether to stop adapting
 """
-    check_end_adaptation(state, accepted, spl)
+    check_end_adaptation(state, spl)
 
-Check whether adaptation should stop based on the current state and acceptance criteria.
+Decide whether adaptation should stop, given the acceptance rate averaged over
+the block that has just completed. Called only at block boundaries.
 
-# Arguments
-- `state::AMGSStoppingState`: The current sampler state.
-- `accepted::Bool`: Whether the current proposal was accepted.
-- `spl::AMGS_Stopping_Sampler`: The AMGS Stopping sampler.
-
-# Returns
-`true` if adaptation should stop, `false` otherwise.
+Stops when either the hard `max_adapt_period` cap is reached, or the block
+average acceptance rate lies strictly inside the target window.
 """
-function check_end_adaptation(state::AMGSStoppingState, accepted::Bool, spl::AMGS_Stopping_Sampler)
-    # Only check if this step we are at the end of an adaptation interval
-    if ((state.step + 1) % spl.average_interval) !== 0
-        return false
-    end
-    
-    # End if we have hit the max adaptation steps
+function check_end_adaptation(state::AMGSStoppingState, spl::AMGS_Stopping_Sampler)
+    # Hard cap on the adaptation period (-1 disables it).
     if (spl.max_adapt_period != -1) && (state.step >= spl.max_adapt_period)
         return true
     end
-
-    # Check whether to stop adapting
-    if (state.mean_accep > spl.lower_stopping_accep) && (state.mean_accep < spl.upper_stopping_accep)
+    # Acceptance rate has settled inside the target window.
+    if (state.mean_accep > spl.lower_stopping_accep) &&
+        (state.mean_accep < spl.upper_stopping_accep)
         return true
     end
     return false
 end
 
-# update the runing mean and covariance
-# Use Welford's online algorithm for numerical stability
 """
-    running_update_state(state, step_mod, accepted, spl)
+    block_update_state(state, accepted, spl)
 
-Update the running statistics for the stopping sampler using Welford's online algorithm.
+Advance the block bookkeeping by one iteration.
 
-# Arguments
-- `state::AMGSStoppingState`: The current sampler state.
-- `step_mod::Int`: The step modulo for tracking adaptation intervals.
-- `accepted::Bool`: Whether the current proposal was accepted.
-- `spl`: The sampler.
+`average_interval` is an *averaging* window for the acceptance rate, not an
+adaptation period: the kernel is adapted every iteration (as in base AMGS), and
+this function separately accumulates the acceptance rate and the within-block
+running mean/covariance. At the end of each block the accumulated acceptance
+rate is tested against the stopping window and then reset.
 
-# Returns
-The updated state with new running statistics.
+Keeping the reset here — rather than inside [`update_kernel!`](@ref) — is what
+makes the stopping rule work at all. If the accumulator were cleared on every
+kernel update it would never rise above `1/average_interval`, so the
+acceptance-rate criterion could never fire and only `max_adapt_period` could
+ever stop the adaptation.
+
+Once `stopped` is set the state is returned untouched: the kernel is frozen.
 """
-function running_update_state(state::AMGSStoppingState, step_mod::Int, accepted::Bool, spl)
+function block_update_state(
+    state::AMGSStoppingState, accepted::Bool, spl::AMGS_Stopping_Sampler
+)
     if state.stopped
-        return state
+        # Still advance the step counter so the chain length stays meaningful.
+        return _with_step(state, state.step + 1)
     end
-    # Check whether to stop adapting
-    stop_adapting = check_end_adaptation(state, accepted, spl)
-    theta = state.varinfo[:]
+
+    step = state.step + 1
+    θ = state.θ
+    μ_run = state.μ_running_avg
+    Σ_run = state.kernel_running_calc
+
+    # 0-based position of this iteration within the current block.
+    step_mod = (step - 1) % spl.average_interval
+
     if step_mod == 0
-        state = AMGSStoppingState(
-            state.transition,
-            state.varinfo,
-            state.μ,
-            state.kernel,
-            state.step + 1,
-            state.β,
-            state.Δi,
-            stop_adapting,
-            state.logjoint_internal,
-            state.mean_accep + accepted / spl.average_interval,
-            theta,
-            state.kernel,
-        )
-    else     
+        # First iteration of a new block: seed the running mean.
+        copyto!(μ_run, θ)
+        fill!(Σ_run, zero(eltype(Σ_run)))
+    else
+        # Welford online update, in place.
         n = step_mod + 1
-        δ = theta .- state.μ_running_avg
-        running_μ = state.μ_running_avg .+ δ ./ n
-        state = AMGSStoppingState(
-            state.transition,
-            state.varinfo,
-            state.μ,
-            state.kernel,
-            state.step + 1,
-            state.β,
-            state.Δi,
-            stop_adapting,
-            state.logjoint_internal,
-            state.mean_accep + accepted / spl.average_interval,
-            running_μ,
-            (step_mod * state.kernel_running_calc .+ δ * transpose(theta .- running_μ)) ./ n,
+        Δ = state.Δ_cache
+        @inbounds @simd for i in eachindex(θ)
+            Δ[i] = θ[i] - μ_run[i]
+            μ_run[i] += Δ[i] / n
+        end
+        @inbounds for i in eachindex(θ)
+            for j in eachindex(θ)
+                Σ_run[i, j] = (step_mod * Σ_run[i, j] + Δ[i] * (θ[j] - μ_run[j])) / n
+            end
+        end
+    end
+
+    mean_accep = state.mean_accep + accepted / spl.average_interval
+
+    new_state = AMGSStoppingState(
+        state.ldf,
+        state.transition,
+        θ,
+        state.logp,
+        state.μ,
+        state.kernel,
+        step,
+        state.β,
+        state.stopped,
+        mean_accep,
+        μ_run,
+        Σ_run,
+        state.Δ_cache,
+        state.θ_prop,
+        state.z_cache,
+    )
+
+    # End of a block: test the stopping criterion, then reset the accumulator.
+    if step % spl.average_interval == 0
+        stopped = check_end_adaptation(new_state, spl)
+        new_state = AMGSStoppingState(
+            new_state.ldf,
+            new_state.transition,
+            θ,
+            new_state.logp,
+            new_state.μ,
+            new_state.kernel,
+            step,
+            new_state.β,
+            stopped,
+            0.0,                # reset the block acceptance average
+            μ_run,
+            Σ_run,
+            new_state.Δ_cache,
+            new_state.θ_prop,
+            new_state.z_cache,
         )
     end
-    return state
-end
 
-# Function to set the new parameters (for use with gibbs sampler)
-Turing.Inference.isgibbscomponent(::AMGS_Stopping_Sampler) = true 
-
-Turing.Inference.init_strategy(::AMGS_Stopping_Sampler) = DynamicPPL.InitFromPrior()
-
-# Get varinfo
-function Turing.Inference.get_varinfo(state::T) where {T<:AMGSStoppingState}
-    return state.varinfo
-end
-
-function Turing.Inference.setparams_varinfo!!(
-    model::DynamicPPL.Model,
-    sampler::AMGS_Stopping_Sampler,
-    state::AMGSStoppingState,
-    params::TVI,
-    ) where {TVI <: AbstractVarInfo}
-
-    # Update the vi
-    vi = state.varinfo
-    vi = DynamicPPL.unflatten(vi, params[:])
-    vi  = last(DynamicPPL.evaluate!!(model, vi)) 
-
-    lp = DynamicPPL.getlogjoint_internal(vi)
-    # #update the model state
-    new_transition = DynamicPPL.ParamsWithStats(vi, model)
-    new_state = AMGSStoppingState(new_transition, vi, state.μ, state.kernel, state.step, state.β, state.Δi, state.stopped, lp, state.mean_accep, state.μ_running_avg, state.kernel_running_calc) 
-    
-    # Update the VarInfo with the new log density
     return new_state
 end
 
-
-# Write a function which proposes a new set of parameters
-"""
-    propose_amgs(rng, vi, model, spl, Σ)
-
-Propose a new set of parameters using a random walk proposal with the given covariance matrix.
-
-# Arguments
-- `rng::AbstractRNG`: The random number generator.
-- `vi::AbstractVarInfo`: The variable information object.
-- `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::AMGS_Stopping_Sampler`: The AMGS Stopping sampler.
-- `state::AMGSStoppingState`: The current state of the sampler.
-- `Σ::AbstractMatrix{<:Real}`: The covariance matrix for the proposal.
-
-# Returns
-The updated `VarInfo` object with the proposed parameters and log density.
-"""
-function propose_amgs(
-    rng::AbstractRNG,
-    vi::AbstractVarInfo,
-    model::AbstractMCMC.AbstractModel,
-    spl::AMGS_Stopping_Sampler,
-    state::AMGSStoppingState,
-    Σ::AbstractMatrix
-)
-    # Grab the parameters we are performing inference on
-    θ = vi[:]
-
-    # Propose a new set of parameters
-    proposal = proposewalk(rng, θ, Σ)
-
-    proposal_vi = DynamicPPL.unflatten(vi, proposal)
-
-    # Call a function to update the varinfo and evaluate the logdensity
-    return Turing.Inference.setparams_varinfo!!(model, spl, state, proposal_vi)
+"Return `state` with only its step counter replaced."
+function _with_step(state::AMGSStoppingState, step::Integer)
+    return AMGSStoppingState(
+        state.ldf,
+        state.transition,
+        state.θ,
+        state.logp,
+        state.μ,
+        state.kernel,
+        step,
+        state.β,
+        state.stopped,
+        state.mean_accep,
+        state.μ_running_avg,
+        state.kernel_running_calc,
+        state.Δ_cache,
+        state.θ_prop,
+        state.z_cache,
+    )
 end
 
-# Write a function which initialises the chain where there are warmup steps
+####
+#### Sampler interface
+####
+
+Turing.Inference.isgibbscomponent(::AMGS_Stopping_Sampler) = true
+Turing.Inference.init_strategy(::AMGS_Stopping_Sampler) = DynamicPPL.InitFromPrior()
+
+function _stopping_initial_state(
+    rng::AbstractRNG, model::DynamicPPL.Model, initial_params
+)
+    ldf = build_ldf(model, rng, initial_params)
+    θ = initial_theta(ldf)
+    logp = LogDensityProblems.logdensity(ldf, θ)
+    transition = DynamicPPL.ParamsWithStats(θ, ldf, (; accepted=true))
+    return init_AMGSStoppingState(ldf, transition, θ, logp, initial_kernel(θ))
+end
+
 """
-    step_warmup(rng, model, spl; initial_params = nothing, kwargs...)
+    _stopping_step!(rng, state, spl, Σ, discard_sample)
 
-Perform an initial warmup step for the AMGS Stopping sampler.
-
-# Arguments
-- `rng::AbstractRNG`: The random number generator.
-- `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::AMGS_Stopping_Sampler`: The AMGS Stopping sampler.
-- `initial_params`: (Optional) The initial parameters.
-- `kwargs...`: Additional keyword arguments.
-
-# Returns
-A tuple containing the transition and the updated state.
+One iteration: propose/accept, adapt the kernel (every iteration, exactly as
+base AMGS does), then advance the block bookkeeping that drives the stopping
+rule. Once adaptation has stopped, the kernel update is skipped and the chain
+continues with a fixed proposal.
 """
+function _stopping_step!(
+    rng::AbstractRNG,
+    state::AMGSStoppingState,
+    spl::AMGS_Stopping_Sampler,
+    Σ::AbstractMatrix,
+    scale::Real,
+    discard_sample::Bool,
+)
+    accep, logp, prob = metropolis_move!(rng, state, Σ, scale)
+
+    # The cached transition must always be kept consistent with the current
+    # position, even when the sample is discarded: `discard_sample` suppresses
+    # what is *returned*, not the bookkeeping. Leaving the cache stale during
+    # warmup would make the first post-warmup rejection emit the parameter
+    # values from wherever the chain was when warmup began.
+    transition = if accep
+        make_transition(state, true)     # θ moved: must re-evaluate
+    else
+        reuse_transition(state, false)   # θ unchanged: reuse, no model eval
+    end
+
+    # Rebuild with the post-move position, log-density and transition.
+    moved = AMGSStoppingState(
+        state.ldf,
+        transition,
+        state.θ,
+        logp,
+        state.μ,
+        state.kernel,
+        state.step,
+        state.β,
+        state.stopped,
+        state.mean_accep,
+        state.μ_running_avg,
+        state.kernel_running_calc,
+        state.Δ_cache,
+        state.θ_prop,
+        state.z_cache,
+    )
+
+    # Adapt every iteration while adaptation is live.
+    if !moved.stopped
+        _, β = update_kernel!(rng, moved, spl, prob)
+        moved = AMGSStoppingState(
+            moved.ldf,
+            moved.transition,
+            moved.θ,
+            moved.logp,
+            moved.μ,
+            moved.kernel,
+            moved.step,
+            β,
+            moved.stopped,
+            moved.mean_accep,
+            moved.μ_running_avg,
+            moved.kernel_running_calc,
+            moved.Δ_cache,
+            moved.θ_prop,
+            moved.z_cache,
+        )
+    end
+
+    new_state = block_update_state(moved, accep, spl)
+
+    return (discard_sample ? nothing : transition), new_state
+end
+
+
 function AbstractMCMC.step_warmup(
     rng::AbstractRNG,
-    model::AbstractMCMC.AbstractModel,
+    model::DynamicPPL.Model,
     spl::AMGS_Stopping_Sampler;
-    initial_params = Turing.Inference.init_strategy(spl),
-    discard_sample = false,
+    initial_params=Turing.Inference.init_strategy(spl),
+    discard_sample=false,
     kwargs...,
 )
-    # If we're doing random walk with a covariance matrix,
-    # just link everything before sampling.
-    #vis = DynamicPPL.default_varinfo(rng, model, spl)
-
-    vis = DynamicPPL.VarInfo(model)
-    _, vis = DynamicPPL.init!!(rng, model, vis, initial_params)
-
-    # If there are initial parameters, set them and the logdensity
-#     if initial_params !== nothing
-#         vis = DynamicPPL.initialize_parameters!!(vis, initial_params, model)
-#         vis = last(DynamicPPL.evaluate!!(model, vis))
-#     end
-# 
-    # Link the variables
-    DynamicPPL.link!!(vis, model)
-    DynamicPPL.evaluate!!(model, vis)
-
-    # Get the log density of the current parameters
-    lp_old = DynamicPPL.getlogjoint_internal(vis)
-    prev_transition = DynamicPPL.ParamsWithStats(vis, model)
-
-    # Get the parameters of interest and create the covariance matrix
-    theta = vis[:]
-    Σ = 0.01 .* diagm(abs.(theta)) + (1e-6 * I)
-
-    # get the old state:
-    orig_state = init_AMGSStoppingState(prev_transition, vis, theta, Σ, spl)
-
-    # Propose a new set of parameters and grab the log density
-    new_state = propose_amgs(rng, vis, model, spl, orig_state, Σ)
-    lp_proposal = new_state.logjoint_internal
-
-    # Check whether to accept the new parameters and return the previous transition if not
-    accep = mh_accept_logdens(rng, lp_proposal, lp_old)
-
-    return_transition = discard_sample ? nothing : (accep ? new_state.transition : prev_transition)
-    
-    return return_transition, accep ? new_state : orig_state 
-
+    state = _stopping_initial_state(rng, model, initial_params)
+    return _stopping_step!(rng, state, spl, state.kernel, 1.0, discard_sample)
 end
 
-"""
-    AbstractMCMC.step_warmup(rng::AbstractRNG, model::AbstractMCMC.AbstractModel, spl::AMGS_Stopping_Sampler, state::AMGSStoppingState; initial_params=nothing, kwargs...)
-
-Perform a warmup step for the AMGS Stopping sampler for a given state.
-
-# Arguments
-- `rng::AbstractRNG`: The random number generator.
-- `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::AMGS_Stopping_Sampler`: The AMGS Stopping sampler.
-- `state::AMGSStoppingState`: The current state of the sampler.
-- `kwargs...`: Additional keyword arguments.
-"""
 function AbstractMCMC.step_warmup(
     rng::AbstractRNG,
-    model::AbstractMCMC.AbstractModel,
+    model::DynamicPPL.Model,
     spl::AMGS_Stopping_Sampler,
     state::AMGSStoppingState;
-    discard_sample = false,
-    kwargs...
+    discard_sample=false,
+    kwargs...,
 )
-    # Grab the VarInfo and logdensity of the current parameters
-    vis = state.varinfo
-    lp_old = state.logjoint_internal
-
-    # Get the kernel
-    Σ = state.kernel
-
-    # Propose the new parameters and get the log density
-    proposal_state = propose_amgs(rng, vis, model, spl, state, Σ)
-    lp_proposal = proposal_state.logjoint_internal
-
-    # Check whether to accept the new parameters and return the previous transition if not
-    accep = mh_accept_logdens(rng, lp_proposal, lp_old)
-    
-    return_transition = discard_sample ? nothing : (accep ? proposal_state.transition : state.transition)
-    return return_transition, accep ? proposal_state : state
+    return _stopping_step!(rng, state, spl, state.kernel, exp(state.β), discard_sample)
 end
 
-"""
-    AbstractMCMC.step(rng::AbstractRNG, model::DynamicPPL.Model, spl::AMGS_Stopping_Sampler; initial_params=nothing, kwargs...)
-
-Perform an initial sampling step for the AMGS Stopping sampler.
-
-# Arguments
-- `rng::AbstractRNG`: The random number generator.
-- `model::DynamicPPL.Model`: The model.
-- `spl::AMGS_Stopping_Sampler`: The AMGS Stopping sampler.
-- `initial_params`: The initial parameters (optional).
-- `kwargs...`: Additional keyword arguments.
-"""
 function AbstractMCMC.step(
     rng::AbstractRNG,
     model::DynamicPPL.Model,
     spl::AMGS_Stopping_Sampler;
-    initial_params = Turing.Inference.init_strategy(spl),
-    discard_sample = false,
+    initial_params=Turing.Inference.init_strategy(spl),
+    discard_sample=false,
     kwargs...,
 )
-    # If we're doing random walk with a covariance matrix,
-    # just link everything before sampling.
-
-    vis = DynamicPPL.VarInfo(model)
-    _, vis = DynamicPPL.init!!(rng, model, vis, initial_params)
-    
-    # vis = DynamicPPL.default_varinfo(rng, model, spl)
-
-    # # If there are initial parameters, set them and the logdensity
-    # if initial_params !== nothing
-    #     vis = DynamicPPL.initialize_parameters!!(vis, initial_params, model)
-    #     vis = last(DynamicPPL.evaluate!!(model, vis))
-    # end    # Link the variables
-
-    DynamicPPL.link!!(vis, model)
-    DynamicPPL.evaluate!!(model, vis)
-
-    # Get the log density of the current parameters
-    lp_old = DynamicPPL.getlogjoint_internal(vis)
-
-    # Create a transition object in case of rejection
-    prev_transition = DynamicPPL.ParamsWithStats(model, vis)
-
-    # Get the parameters of interest and create the covariance matrix
-    theta = vis[:]
-    Σ = 0.01 .* diagm(abs.(theta)) + (1e-6 * I)
-
-    orig_state = init_AMGSStoppingState(prev_transition, vis, theta, Σ, spl) 
-    # Propose a new set of parameters and grab the log density
-    proposal_state = propose_amgs(rng, vis, model, spl, orig_state, Σ)
-    lp_proposal = proposal_state.logjoint_internal
-
-    # Check whether to accept the new parameters 
-    accep = mh_accept_logdens(rng, lp_proposal, lp_old)
-
-    # Construct the transition object to be returned
-    new_trans = accep ? proposal_state.transition : prev_transition
-
-    # Construct the initial state of the sampler
-    upd_state = accep ? proposal_state : orig_state
-    
-    # Update the running mean and covariance and check whether the adaptation should stop
-    upd_state = running_update_state(upd_state, upd_state.step % spl.average_interval, accep, spl)
-
-    # If stopped, do not update the kernel
-    if upd_state.stopped
-        return new_trans, upd_state
-    end
-
-    # Update the kernel and return the new transition and state
-    prob = exp(min(0.0, (lp_proposal - lp_old)))
-    
-    if (upd_state.step % spl.average_interval) == 0
-        upd_state = update_kernel(rng, upd_state, new_trans, spl, prob)
-    end
-    return_transition = discard_sample ? nothing : new_trans
-    return return_transition, upd_state
+    state = _stopping_initial_state(rng, model, initial_params)
+    return _stopping_step!(rng, state, spl, state.kernel, 1.0, discard_sample)
 end
 
-
-#TODO Add a case for when the averaging interval is Inf
-
-"""
-    AbstractMCMC.step(rng::AbstractRNG, model::AbstractMCMC.AbstractModel, spl::AMGS_Stopping_Sampler, state::AMGSStoppingState; initial_params=nothing, kwargs...)
-
-Perform a sampling step for the AMGS Stopping sampler given a state.
-
-# Arguments
-- `rng::AbstractRNG`: The random number generator.
-- `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::AMGS_Stopping_Sampler`: The AMGS Stopping sampler.
-- `state::AMGSStoppingState`: The current state of the sampler.
-- `kwargs...`: Additional keyword arguments.
-"""
 function AbstractMCMC.step(
     rng::AbstractRNG,
-    model::AbstractMCMC.AbstractModel,
+    model::DynamicPPL.Model,
     spl::AMGS_Stopping_Sampler,
     state::AMGSStoppingState;
-    discard_sample = false,
+    discard_sample=false,
     kwargs...,
 )
-    # If we're doing random walk with a covariance matrix,
-    # just link everything before sampling.
-    vis = state.varinfo
-    lp_old = state.logjoint_internal
-
-    # Propose the new parameters and get the log density
-    proposal_state = propose_amgs(rng, vis, model, spl, state, exp(state.β) * state.kernel)
-    lp_proposal = proposal_state.logjoint_internal
-
-    # Check whether to accept the new parameters
-    accep = mh_accept_logdens(rng, lp_proposal, lp_old)
-
-    # Construct the transition object to be returned
-    new_trans = accep ? proposal_state.transition : state.transition 
-    new_state = accep ? proposal_state : state
-
-    # Update the running mean and covariance and check whether the adaptation should stop
-    new_state = running_update_state(new_state, new_state.step % spl.average_interval, accep, spl)
-
-    #if stopped, do not update the kernel
-    if new_state.stopped
-        return new_trans, new_state
-    end
-    
-    # Update the kernel and return the new transition and state
-    prob = exp(min(0.0, (lp_proposal - lp_old)))
-    new_state = update_kernel(rng, new_state, new_trans, spl, prob)
-    return_transition = discard_sample ? nothing : new_trans
-    return return_transition, new_state
+    return _stopping_step!(rng, state, spl, state.kernel, exp(state.β), discard_sample)
 end
 
-# function DynamicPPL.assume(
-#     rng::Random.AbstractRNG, spl::AMGS_Stopping_Sampler, dist::Distribution, vn::T_VN, vi
-# ) where {T_VN <: DynamicPPL.VarName}
-#     # DynamicPPL.updategid!(vi, vn, spl)
-#     return DynamicPPL.assume(dist, vn, vi)
-# end
+####
+#### Gibbs interface
+####
 
-"""
-    getlogevidence(transitions, sampler, state)
+function Turing.Inference.gibbs_update_state!!(
+    ::AMGS_Stopping_Sampler,
+    state::AMGSStoppingState,
+    model::DynamicPPL.Model,
+    global_vals::DynamicPPL.VarNamedTuple,
+)
+    new_ldf, θ, logp, transition = gibbs_rebuild(state, model, global_vals)
+    return AMGSStoppingState(
+        new_ldf,
+        transition,
+        θ,
+        logp,
+        state.μ,
+        state.kernel,
+        state.step,
+        state.β,
+        state.stopped,
+        state.mean_accep,
+        state.μ_running_avg,
+        state.kernel_running_calc,
+        state.Δ_cache,
+        state.θ_prop,
+        state.z_cache,
+    )
+end
 
-Get the log evidence from a collection of transitions. For AMGS samplers, this returns `missing` as log evidence computation is not implemented.
-
-# Arguments
-- `transitions`: Vector of transitions from the sampling process.
-- `sampler::AMGS_Stopping_Sampler`: The AMGS Stopping sampler.
-- `state`: The final sampler state.
-
-# Returns
-`missing` (log evidence computation not implemented for AMGS samplers).
-"""
 getlogevidence(transitions, sampler::AMGS_Stopping_Sampler, state) = missing
-
-"""
-    AbstractMCMC.bundle_samples(ts, model, spl, state, chain_type; kwargs...)
-
-Bundle the sampling results into an MCMCChains.Chains object.
-
-# Arguments
-- `ts::Vector{<:DynamicPPL.ParamsWithStats}`: Vector of transitions from the sampling process.
-- `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::AMGS_Stopping_Sampler`: The AMGS Stopping sampler.
-- `state`: The final sampler state.
-- `chain_type::Type{MCMCChains.Chains}`: The type of chain to create.
-- `save_state::Bool`: Whether to save the sampler state in the chain info.
-- `stats`: Timing statistics (optional).
-- `sort_chain::Bool`: Whether to sort the chain variables.
-- `include_varname_to_symbol::Bool`: Whether to include variable name mappings.
-- `discard_initial::Int`: Number of initial samples to discard.
-- `thinning::Int`: Thinning factor for the chain.
-- `kwargs...`: Additional keyword arguments.
-
-# Returns
-An `MCMCChains.Chains` object containing the bundled samples.
-"""
-# function AbstractMCMC.bundle_samples(
-#     ts::Vector{<:DynamicPPL.ParamsWithStats},
-#     model::AbstractMCMC.AbstractModel,
-#     spl::AMGS_Stopping_Sampler,
-#     state,
-#     chain_type::Type{MCMCChains.Chains};
-#     save_state=false,
-#     stats=missing,
-#     sort_chain=false,
-#     include_varname_to_symbol=true,
-#     discard_initial=0,
-#     thinning=1,
-#     kwargs...,
-# )
-#     # Convert transitions to array format.
-#     # Also retrieve the variable names.
-#     varnames, vals = _params_to_array(model, ts)
-#     varnames_symbol = map(Symbol, varnames)
-# 
-#     # Get the values of the extra parameters in each transition.
-#     extra_params, extra_values = Turing.Inference.get_transition_extras(ts)
-# 
-#     # Extract names & construct param array.
-#     nms = [varnames_symbol; extra_params]
-#     parray = hcat(vals, extra_values)
-# 
-#     # Get the average or final log evidence, if it exists.
-#     le = getlogevidence(ts, spl, state)
-# 
-#     # Set up the info tuple.
-#     info = NamedTuple()
-# 
-#     if include_varname_to_symbol
-#         info = merge(info, (varname_to_symbol=OrderedDict(zip(varnames, varnames_symbol)),))
-#     end
-# 
-#     if save_state
-#         info = merge(info, (model=model, sampler=spl, samplerstate=state))
-#     end
-# 
-#     # Merge in the timing info, if available
-#     if !ismissing(stats)
-#         info = merge(info, (start_time=stats.start, stop_time=stats.stop))
-#     end
-# 
-#     # Conretize the array before giving it to MCMCChains.
-#     parray = MCMCChains.concretize(parray)
-# 
-#     # Chain construction.
-#     chain = MCMCChains.Chains(
-#         parray,
-#         nms,
-#         (internals=extra_params,);
-#         evidence=le,
-#         info=info,
-#         start=discard_initial + 1,
-#         thin=thinning,
-#     )
-# 
-#     return sort_chain ? sort(chain) : chain
-# end

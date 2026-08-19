@@ -1,37 +1,69 @@
-#  write a functions step and step_warmup which are used in the AMGS_DA_sampler.
-# Based on Algorithm 4 in https://link.springer.com/article/10.1007/s11222-008-9110-y
+"""
+amgs_DA_sample.jl
 
-# Start by defining the sampler
+AMGS with **dual-averaging** adaptation of the global proposal scale.
+
+The covariance `Σ` is adapted exactly as in base AMGS (Robbins–Monro / Haario),
+but the global scale multiplier is tuned by Nesterov dual averaging — the same
+scheme Stan and NUTS use for step-size adaptation (Hoffman & Gelman 2014,
+Algorithm 6):
+
+    Hₜ = α* - αₜ
+    ḡₜ = (1 - 1/(t+t₀)) ḡₜ₋₁ + (1/(t+t₀)) Hₜ
+    xₜ = μ - (√t / γ) ḡₜ
+    x̄ₜ = t^(-κ) xₜ + (1 - t^(-κ)) x̄ₜ₋₁
+
+with the proposal covariance then being `exp(x̄ₜ) Σ`.
+
+Compared with the plain Robbins–Monro scale update in [`AMGS_Sampler`](@ref),
+dual averaging is far less sensitive to the early, badly-scaled iterations: `ḡ`
+averages the acceptance error over the whole history, and the `x̄` smoothing
+damps the oscillation that a raw stochastic-approximation update shows when the
+covariance is still moving.
+
+This implementation uses the *averaged* iterate `x̄` as the live scale
+throughout, rather than running on `x` and switching to `x̄` only at the end of
+warmup. That is more conservative — the scale moves more smoothly — at the cost
+of responding more slowly to a rapidly improving covariance.
+
+Reference: Hoffman & Gelman (2014), "The No-U-Turn Sampler", JMLR 15.
+"""
 
 """
-    AMGS_DA_Sampler(acceptance_rate, convergence_step; use_noise_stabiliser=false, noise_scaling=1e-6, μ=0.0, γ=0.05, t0=10.0, κ=0.75)
+    AMGS_DA_Sampler(acceptance_rate, convergence_step)
+    AMGS_DA_Sampler(acceptance_rate, convergence_step, use_noise_stabiliser, noise_scaling)
 
-Data Augmentation variant of the Adaptive Metropolis-within-Gibbs sampler.
-
-This sampler implements an adaptive MCMC algorithm designed for data augmentation
-contexts, using additional adaptation parameters for improved performance in
-hierarchical models or models with latent variables.
+AMGS with dual-averaging adaptation of the global scale.
 
 # Fields
-- `acceptance_rate::Real`: target acceptance rate for the Robbins–Monro update.
-- `convergence_step::Real`: controls the step-size decay in adaptation (power).
-- `use_noise_stabiliser::Val{Bool}`: fast-dispatch flag to optionally add noise.
-- `noise_scaling::Real`: variance scale used by the optional noise stabiliser.
-- `μ::Real`: adaptation parameter for mean updates.
-- `γ::Real`: adaptation parameter for covariance scaling.
-- `t0::Real`: initial adaptation time parameter.
-- `κ::Real`: adaptation decay parameter.
+- `acceptance_rate::Real`: target acceptance rate `α*`.
+- `convergence_step::Real`: Robbins–Monro decay exponent `γ` for the *covariance*
+  update (distinct from the dual-averaging `γ` below).
+- `use_noise_stabiliser::Val{Bool}`, `noise_scaling::Real`: optional covariance
+  noise stabiliser (see [`add_noise!`](@ref)).
+- `μ::Real`: the point dual averaging shrinks the log-scale towards (default
+  `0.0`, i.e. a scale multiplier of 1).
+- `γ::Real`: dual-averaging gain; smaller means larger steps (default `0.05`).
+- `t0::Real`: iteration offset damping early updates (default `10.0`).
+- `κ::Real`: decay exponent of the `x̄` averaging, in `(0.5, 1]` (default `0.75`).
 
-# Examples
+The `μ`, `γ`, `t0`, `κ` defaults are Stan's.
+
+# Example
 ```julia
-sampler = AMGS_DA_Sampler(0.234, 1000)
-chain = sample(model, sampler, 1000)
+spl = AMGS_DA_Sampler(0.234, 0.6)
 ```
-
-TODO: Add detailed explanation of data augmentation context and parameter meanings.
-TODO: Explain the adaptation scheme differences from standard AMGS.
 """
-struct AMGS_DA_Sampler{ T_accep <: Real, T_conv_step <: Real, T_scale <: Real, T_B, T_μ <: Real, T_γ <: Real, T_t <: Real, T_κ <: Real} <: AbstractMCMC.AbstractSampler
+struct AMGS_DA_Sampler{
+    T_accep<:Real,
+    T_conv_step<:Real,
+    T_scale<:Real,
+    T_B,
+    T_μ<:Real,
+    T_γ<:Real,
+    T_t<:Real,
+    T_κ<:Real,
+} <: AbstractMCMC.AbstractSampler
     acceptance_rate::T_accep
     convergence_step::T_conv_step
     use_noise_stabiliser::Val{T_B}
@@ -44,241 +76,226 @@ end
 
 function AMGS_DA_Sampler(
     acceptance_rate::T1,
-    convergence_step::T2;
-) where {T1 <: Real, T2 <: Real}
-return AMGS_DA_Sampler(acceptance_rate, convergence_step, Val(false), 1e-6, 0.0, 0.05, 10.0, 0.75)
-end
-
-function AMGS_DA_Sampler(
-    acceptance_rate::T1,
     convergence_step::T2,
-    use_noise_stabiliser::Bool,
-    noise_scaling::T3
-) where {T1 <: Real, T2 <: Real, T3 <: Real }
-return AMGS_DA_Sampler(acceptance_rate, convergence_step, Val(use_noise_stabiliser), noise_scaling, 0.0, 0.05, 10.0, 0.75)
+    use_noise_stabiliser::Bool=false,
+    noise_scaling::Real=1e-6;
+    μ::Real=0.0,
+    γ::Real=0.05,
+    t0::Real=10.0,
+    κ::Real=0.75,
+) where {T1<:Real,T2<:Real}
+    γ > 0 || throw(ArgumentError("dual-averaging γ must be positive"))
+    t0 > 0 || throw(ArgumentError("dual-averaging t0 must be positive"))
+    0.5 < κ <= 1 || throw(ArgumentError("dual-averaging κ must lie in (0.5, 1]"))
+    return AMGS_DA_Sampler(
+        acceptance_rate,
+        convergence_step,
+        Val(use_noise_stabiliser),
+        noise_scaling,
+        μ,
+        γ,
+        t0,
+        κ,
+    )
 end
 
-
-# DynamicPPL.default_chain_type(sampler::AMGS_DA_Sampler) = MCMCChains.Chains
-
-# Define the state of the sampler
-# Contains Important quantities for computation of the updated kernel
 """
     AMGSDAState
 
-State container used by the AMGS Data Augmentation sampler to store running statistics
-required for adaptation in data augmentation contexts.
+State for [`AMGS_DA_Sampler`](@ref).
 
-# Fields
-- `transition`: the latest `DynamicPPL.ParamsWithStats` object.
-- `varinfo`: the `VarInfo` corresponding to the current parameter values.
-- `μ`: running mean vector of parameters.
-- `kernel`: running covariance (or scale) matrix used for proposals.
-- `step`: integer step counter for adaptation scheduling.
-- `β`: scalar adapt scaling for acceptance rate control.
-- `logjoint_internal`: cached log joint density for the current state.
-- `Δ_cache`: preallocated buffer used for delta computations.
-- `x̄`: running average of some adaptation statistic.
-- `ḡ`: running average of gradient-like adaptation statistic.
+Extends the base AMGS state with the two dual-averaging accumulators.
+
+# Additional fields
+- `x̄`: the averaged log-scale iterate; this is what `β` is set to and what
+  actually scales the proposal.
+- `ḡ`: the running average of the acceptance error `α* - α`.
 """
 struct AMGSDAState{
+    TLDF<:DynamicPPL.LogDensityFunction,
     TTrans<:DynamicPPL.ParamsWithStats,
-    TVI<:AbstractVarInfo,
-    Tμ<:AbstractVector,
+    Tθ<:AbstractVector,
     TKernel<:AbstractMatrix,
     TStep<:Integer,
     Tβ<:Real,
-    TL<:Real    
-}
+    TL<:Real,
+} <: AbstractAMGSState
+    ldf::TLDF
     transition::TTrans
-    varinfo::TVI
-    μ::Tμ
+    θ::Tθ
+    logp::TL
+    μ::Tθ
     kernel::TKernel
     step::TStep
     β::Tβ
-    logjoint_internal::TL
-    Δ_cache::Tμ
     x̄::Tβ
-    ḡ::Tβ
+    ḡ::Tβ
+    Δ_cache::Tθ
+    θ_prop::Tθ
+    z_cache::Tθ
 end
 
-# Define the initial state of the sampler
 """
-    init_AMGSDAState(transition::T_trans, μ::Vector{T_μ}, kernel::T_kernel) where {T_trans <: DynamicPPL.ParamsWithStats, T_μ <: Real, T_kernel <: AbstractMatrix}
+    init_AMGSDAState(ldf, transition, θ, logp, kernel)
 
-Initialize the state of the AMGSDA sampler with the given transition, mean vector μ, and kernel matrix.
+Build the initial dual-averaging state. `x̄` and `ḡ` start at zero, so the
+initial scale multiplier `exp(x̄)` is 1.
 
-# Arguments
-- `transition::T_trans`: The initial transition object.
-- `μ::Vector{T_μ}`: The initial mean vector.
-- `kernel::T_kernel`: The initial kernel matrix.
+The step counter starts at 1, never 0: the dual-averaging smoothing weight
+`t^(-κ)` is infinite at `t = 0`.
 """
 function init_AMGSDAState(
-    transition::T_trans,
-    varinfo::TVI,
-    μ::Vector{T_μ},
-    kernel::T_kernel
-) where {T_trans <: DynamicPPL.ParamsWithStats, TVI <: AbstractVarInfo, T_μ <: Real, T_kernel <: AbstractMatrix}
-    ## copy vector length of mu and initialise zero vector for beta
-    step = 1
-    β = zero(eltype(μ))
-    lp = DynamicPPL.getlogjoint_internal(varinfo) # Get the log joint density
-    AMGSDAState{T_trans, TVI, typeof(μ), T_kernel, Int, typeof(β), typeof(lp)}(transition, varinfo, μ, kernel, step, β, lp, similar(μ), 0, 0)
+    ldf::DynamicPPL.LogDensityFunction,
+    transition::DynamicPPL.ParamsWithStats,
+    θ::AbstractVector,
+    logp::Real,
+    kernel::AbstractMatrix,
+)
+    z = zero(eltype(θ))
+    return AMGSDAState(
+        ldf,
+        transition,
+        θ,
+        logp,
+        copy(θ),
+        kernel,
+        1,
+        z,      # β
+        z,      # x̄
+        z,      # ḡ
+        similar(θ),
+        similar(θ),
+        similar(θ),
+    )
 end
 
 """
-    init_AMGSDAState(transition::T_trans, μ::T_μ, kernel::T_kernel) where {T_trans <: DynamicPPL.ParamsWithStats, T_μ <: Real, T_kernel <: AbstractMatrix}
+    update_kernel!(rng, state, spl, prob)
 
-Initialize the state of the AMGSDA sampler with the given transition, mean value μ, and kernel matrix for a 1D case.
+Adapt the covariance by Robbins–Monro and the global scale by dual averaging.
 
-# Arguments
-- `transition::T_trans`: The initial transition object.
-- `μ::T_μ`: The initial mean value.
-- `kernel::T_kernel`: The initial kernel matrix.
+The covariance recursion is the usual Andrieu & Thoms Algorithm 4 form,
+
+    Δ = θ - μ_t,  μ ← μ + ηΔ,  Σ ← Σ + η(ΔΔᵀ - Σ),
+
+while the scale follows the Nesterov dual-averaging recursion described in the
+file docstring. Returns `(Σ, x̄, ḡ)`; `μ` and `Σ` are mutated in place.
 """
-function init_AMGSDAState(
-    transition::T_trans,
-    varinfo::TVI,
-    μ::T_μ,
-    kernel::T_kernel
-) where {T_trans <: DynamicPPL.ParamsWithStats, TVI <: AbstractVarInfo, T_μ <: Real, T_kernel <: AbstractMatrix}
-    ## copy vector length of mu and initialise zero vector for beta
-    step = 1
-    β = zero(typeof(μ))
-    new_μ = [μ]
-    lp = DynamicPPL.getlogjoint_internal(varinfo) # Get the log joint density
-    AMGSDAState{T_trans, TVI, typeof(new_μ), T_kernel, Int, typeof(β), typeof(lp)}(transition, varinfo, new_μ, kernel, step, β, lp, similar(μ), 0, 0)
-end
-
-"""
-    update_kernel(rng::TRNG, state::AMGSDAState, trans::T, spl::AMGS_DA_Sampler, prob::T3) where {T <: DynamicPPL.ParamsWithStats, T3 <: Real, TRNG <: AbstractRNG}
-
-Update the kernel matrix, and internal quantities of the AMGSDA sampler state based on the new transition and acceptance probability.
-
-# Arguments
-- `state::AMGSDAState`: The current state of the sampler.
-- `trans::T`: The new transition object.
-- `spl::AMGS_DA_Sampler`: The AMGSDA sampler.
-- `prob::T3`: The acceptance probability.
-"""
-function update_kernel(rng::TRNG, state::AMGSDAState, trans::T, spl::AMGS_DA_Sampler, prob::T3) where {T <: DynamicPPL.ParamsWithStats, T3 <: Real, TRNG <: AbstractRNG}
-    μ    = state.μ
+function update_kernel!(
+    rng::AbstractRNG, state::AMGSDAState, spl::AMGS_DA_Sampler, prob::Real
+)
+    μ = state.μ
+    Σ = state.kernel
+    Δ = state.Δ_cache
+    n = length(Δ)
     step = state.step
-    state.Δ_cache .= state.varinfo[:]
-    n    = length(state.Δ_cache)
 
-    # Robbins–Monro gain
     @fastmath begin
+        # --- covariance: Robbins-Monro -----------------------------------
         η = (step + 1.0)^(-spl.convergence_step)
 
-        # Adapt acceptance-rate scaling
-        # β = state.β + η * (prob - spl.acceptance_rate)
-
-        # Update running mean μ ← (1−η)μ + ηθ
-        @. μ += η * (state.Δ_cache - μ)
-
-        # Δ = θ - μ (store in preallocated buffer Δ in the state)
-        @. state.Δ_cache -= μ
-
-        # Outer product update, symmetric and in-place:
+        # Residual against the mean *before* it is updated, then advance the
+        # mean -- the ordering specified in the AMGS pseudocode (Algorithm 1)
+        # and Andrieu & Thoms Algorithm 4. See `update_kernel!` in
+        # amgs_sample.jl for the full recursion.
+        @inbounds @simd for i in 1:n
+            Δ[i] = state.θ[i] - μ[i]
+        end
+        @inbounds @simd for i in 1:n
+            μ[i] += η * Δ[i]
+        end
         @inbounds for i in 1:n
-            Δi = state.Δ_cache[i]
+            Δi = Δ[i]
             for j in i:n
-                #ΔΔ = Δ[i] * Δ[j]
-                #Σ_ij = state.kernel[i,j]
-                state.kernel[i,j] += η * (Δi * state.Δ_cache[j] - state.kernel[i,j])
-                state.kernel[j,i] = state.kernel[i,j]  # preserve symmetry
+                Σ[i, j] += η * (Δi * Δ[j] - Σ[i, j])
+                Σ[j, i] = Σ[i, j]
             end
         end
+        add_noise!(rng, Σ, spl.noise_scaling, n, spl.use_noise_stabiliser)
 
-        # Optional noise stabilisation (fast Val dispatch)
-        @inline _add_noise!(rng, state.kernel, spl.noise_scaling, n, spl.use_noise_stabiliser)
-
-        ## Dual averaging step
+        # --- global scale: Nesterov dual averaging ------------------------
         Ht = spl.acceptance_rate - prob
-        ḡ = (1 - 1/(step + spl.t0)) * state.ḡ + (1/(step + spl.t0)) * Ht
-        x = spl.μ - ((sqrt(step) / spl.γ) * ḡ)
-        x̄ = step^(-spl.κ) * x + (1 - step^(-spl.κ)) * state.x̄
+        w = 1 / (step + spl.t0)
+        ḡ = (1 - w) * state.ḡ + w * Ht
+        x = spl.μ - (sqrt(step) / spl.γ) * ḡ
+        decay = step^(-spl.κ)
+        x̄ = decay * x + (1 - decay) * state.x̄
     end
-    return state.kernel, AMGSDAState(trans, state.varinfo, μ, state.kernel, step + 1, x̄, state.logjoint_internal, state.Δ_cache, x̄, ḡ)
+
+    return Σ, x̄, ḡ
 end
 
-# Function to set the new parameters (for use with gibbs sampler)
-Turing.Inference.isgibbscomponent(::AMGS_DA_Sampler) = true 
+####
+#### Sampler interface
+####
 
+Turing.Inference.isgibbscomponent(::AMGS_DA_Sampler) = true
 Turing.Inference.init_strategy(::AMGS_DA_Sampler) = DynamicPPL.InitFromPrior()
 
-# Get varinfo
-function Turing.Inference.get_varinfo(state::T) where {T<:AMGSDAState}
-    return state.varinfo
+function _da_initial_state(rng::AbstractRNG, model::DynamicPPL.Model, initial_params)
+    ldf = build_ldf(model, rng, initial_params)
+    θ = initial_theta(ldf)
+    logp = LogDensityProblems.logdensity(ldf, θ)
+    transition = DynamicPPL.ParamsWithStats(θ, ldf, (; accepted=true))
+    return init_AMGSDAState(ldf, transition, θ, logp, initial_kernel(θ))
 end
 
-function Turing.Inference.setparams_varinfo!!(
-    model::DynamicPPL.Model,
-    sampler::AMGS_DA_Sampler,
-    state::AMGSDAState,
-    params::T,
-    ) where {T <: AbstractVarInfo}
-
-    # Update the vi
-    # vi = state.varinfo
-    # vi = DynamicPPL.unflatten(vi, params[:])
-    vi  = last(DynamicPPL.evaluate!!(model, params)) 
-
-    lp = DynamicPPL.getlogjoint_internal(vi)
-    # #update the model state
-    new_transition = DynamicPPL.ParamsWithStats(vi, model)
-    new_state = AMGSDAState(new_transition, vi, state.μ, state.kernel, state.step, state.β, lp, state.Δ_cache, state.x̄, state.ḡ) 
-    
-    # Update the VarInfo with the new log density
-    return new_state
-end
-
-# Write a function which proposes a new set of parameters
 """
-    propose_amgs(rng::AbstractRNG, vi::AbstractVarInfo, model::AbstractMCMC.AbstractModel, spl::AMGS_DA_Sampler, Σ::AbstractMatrix)
+    _da_step!(rng, state, spl, Σ, discard_sample)
 
-Propose a new set of parameters for the AMGSDA sampler.
-
-# Arguments
-- `rng::AbstractRNG`: The random number generator.
-- `vi::AbstractVarInfo`: The variable information.
-- `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::AMGS_DA_Sampler`: The AMGSDA sampler.
-- `state::AMGSDAState`: The current state of the sampler.
-- `Σ::AbstractMatrix`: The covariance matrix for the proposal.
+One iteration: propose, accept/reject, then adapt the covariance and the
+dual-averaged scale.
 """
-function propose_amgs(
+function _da_step!(
     rng::AbstractRNG,
-    vi::AbstractVarInfo,
-    model::AbstractMCMC.AbstractModel,
-    spl::AMGS_DA_Sampler,
     state::AMGSDAState,
-    Σ::AbstractMatrix
+    spl::AMGS_DA_Sampler,
+    Σ::AbstractMatrix,
+    scale::Real,
+    discard_sample::Bool,
 )
-    # Grab the parameters we are performing inference on
-    state.Δ_cache .= vi[:]
-    # Propose a new set of parameters
-    proposal = proposewalk(rng, state.Δ_cache, Σ)
-    
-    proposal_vi = DynamicPPL.unflatten(vi, proposal)
+    accep, logp, prob = metropolis_move!(rng, state, Σ, scale)
+    _, x̄, ḡ = update_kernel!(rng, state, spl, prob)
 
-    # Call a function to update the varinfo and evaluate the logdensity
-    return Turing.Inference.setparams_varinfo!!(model, spl, state, proposal_vi) 
+    moved = AMGSDAState(
+        state.ldf,
+        state.transition,
+        state.θ,
+        logp,
+        state.μ,
+        state.kernel,
+        state.step + 1,
+        x̄,          # β is the averaged dual-averaging iterate
+        x̄,
+        ḡ,
+        state.Δ_cache,
+        state.θ_prop,
+        state.z_cache,
+    )
+
+    # Keep the transition cache consistent with the position regardless of
+    # `discard_sample`, which only suppresses what is returned.
+    transition = accep ? make_transition(moved, true) : reuse_transition(moved, false)
+
+    new_state = AMGSDAState(
+        moved.ldf,
+        transition,
+        moved.θ,
+        moved.logp,
+        moved.μ,
+        moved.kernel,
+        moved.step,
+        moved.β,
+        moved.x̄,
+        moved.ḡ,
+        moved.Δ_cache,
+        moved.θ_prop,
+        moved.z_cache,
+    )
+
+    return (discard_sample ? nothing : transition), new_state
 end
 
-"""
-    AbstractMCMC.step_warmup(rng::AbstractRNG, model::AbstractMCMC.AbstractModel, spl::AMGS_DA_Sampler; initial_params=nothing, kwargs...)
-
-Perform an initial warmup step for the AMGSDA sampler.
-
-# Arguments
-- `rng::AbstractRNG`: The random number generator.
-- `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::AMGS_DA_Sampler`: The AMGSDA sampler.
-- `initial_params`: The initial parameters (optional).
-- `kwargs...`: Additional keyword arguments.
-"""
 function AbstractMCMC.step_warmup(
     rng::AbstractRNG,
     model::DynamicPPL.Model,
@@ -287,90 +304,21 @@ function AbstractMCMC.step_warmup(
     discard_sample=false,
     kwargs...,
 )
-    vis = DynamicPPL.VarInfo(model)
-    _, vis = DynamicPPL.init!!(rng, model, vis, initial_params)
-
-    # If there are initial parameters, set them and the logdensity
-    # if initial_params !== nothing
-    #     vis = DynamicPPL.initialize_parameters!!(vis, initial_params, model)
-    #     vis = last(DynamicPPL.evaluate!!(model, vis))
-    # end
-
-    # Link the variables
-    DynamicPPL.link!!(vis, model)
-    DynamicPPL.evaluate!!(model, vis)
-
-    # Get the log density of the current parameters
-    lp_old = DynamicPPL.getlogjoint_internal(vis)
-    prev_transition = DynamicPPL.ParamsWithStats(vis, model)
-
-    # Get the parameters of interest and create the covariance matrix
-    theta = vis[:]
-    Σ = diagm(0.01 .* abs.(theta) .+ 1e-6)
-
-    # get the old state:
-    orig_state = init_AMGSDAState(prev_transition, vis, theta, Σ)
-
-    # Propose a new set of parameters and grab the log density
-    new_state = propose_amgs(rng, vis, model, spl, orig_state, Σ)
-    lp_proposal = new_state.logjoint_internal
-
-    # Check whether to accept the new parameters and return the previous transition if not
-    accep = mh_accept_logdens(rng, lp_proposal, lp_old)
-    return_transition = discard_sample ? nothing : (accep ? new_state.transition : prev_transition)
-
-    return return_transition, accep ? new_state : orig_state
+    state = _da_initial_state(rng, model, initial_params)
+    return _da_step!(rng, state, spl, state.kernel, 1.0, discard_sample)
 end
 
-"""
-    AbstractMCMC.step_warmup(rng::AbstractRNG, model::AbstractMCMC.AbstractModel, spl::AMGS_DA_Sampler, state::AMGSDAState; initial_params=nothing, kwargs...)
-
-Perform a warmup step for the AMGSDA sampler for a given state.
-
-# Arguments
-- `rng::AbstractRNG`: The random number generator.
-- `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::AMGS_DA_Sampler`: The AMGSDA sampler.
-- `state::AMGSDAState`: The current state of the sampler.
-- `kwargs...`: Additional keyword arguments.
-"""
 function AbstractMCMC.step_warmup(
     rng::AbstractRNG,
-    model::AbstractMCMC.AbstractModel,
+    model::DynamicPPL.Model,
     spl::AMGS_DA_Sampler,
     state::AMGSDAState;
     discard_sample=false,
-    kwargs...
+    kwargs...,
 )
-    # Grab the VarInfo and logdensity of the current parameters
-    vis = state.varinfo
-    lp_old = state.logjoint_internal
-
-    # Get the kernel
-    Σ = state.kernel
-
-    # Propose the new parameters and get the log density
-    proposal_state = propose_amgs(rng, vis, model, spl, state, Σ)
-    lp_proposal = proposal_state.logjoint_internal 
-
-    # Check whether to accept the new parameters and return the previous transition if not
-    accep = mh_accept_logdens(rng, lp_proposal, lp_old)
-    return_transition = discard_sample ? nothing : (accep ? proposal_state.transition : state.transition)
-    return return_transition, accep ? proposal_state : state
+    return _da_step!(rng, state, spl, state.kernel, exp(state.β), discard_sample)
 end
 
-"""
-    AbstractMCMC.step(rng::AbstractRNG, model::DynamicPPL.Model, spl::AMGS_DA_Sampler; initial_params=nothing, kwargs...)
-
-Perform an initial sampling step for the AMGSDA sampler.
-
-# Arguments
-- `rng::AbstractRNG`: The random number generator.
-- `model::DynamicPPL.Model`: The model.
-- `spl::AMGS_DA_Sampler`: The AMGSDA sampler.
-- `initial_params`: The initial parameters (optional).
-- `kwargs...`: Additional keyword arguments.
-"""
 function AbstractMCMC.step(
     rng::AbstractRNG,
     model::DynamicPPL.Model,
@@ -379,224 +327,47 @@ function AbstractMCMC.step(
     discard_sample=false,
     kwargs...,
 )
-    vis = DynamicPPL.VarInfo(model)
-    _, vis = DynamicPPL.init!!(rng, model, vis, initial_params)
-
-    # If there are initial parameters, set them and the logdensity
-    # if initial_params !== nothing
-    #     vis = DynamicPPL.initialize_parameters!!(vis, initial_params, model)
-    #     vis = last(DynamicPPL.evaluate!!(model, vis))
-    # end    # Link the variables
-
-    DynamicPPL.link!!(vis, model)
-    DynamicPPL.evaluate!!(model, vis)
-
-    # Get the log density of the current parameters
-    lp_old = DynamicPPL.getlogjoint_internal(vis)
-
-    # Create a transition object in case of rejection
-    prev_transition = DynamicPPL.ParamsWithStats(vis, model)
-
-    # Get the parameters of interest and create the covariance matrix
-    theta = vis[:]
-    Σ = diagm(0.01 .* abs.(theta) .+ 1e-6)
-
-    orig_state = init_AMGSDAState(prev_transition, vis, theta, Σ) 
-    # Propose a new set of parameters and grab the log density
-    proposal_state = propose_amgs(rng, vis, model, spl, orig_state, Σ)
-    lp_proposal = proposal_state.logjoint_internal
-
-    # Check whether to accept the new parameters 
-    accep = mh_accept_logdens(rng, lp_proposal, lp_old)
-
-    # Construct the transition object to be returned
-    new_trans = accep ? proposal_state.transition : prev_transition
-
-    # Construct the initial state of the sampler
-    # new_state = init_AMGSDAState(new_trans, theta, Σ)
-
-    # Update the kernel and return the new transition and state
-    prob = exp(min(0.0, (lp_proposal - lp_old)))
-    _, upd_state = update_kernel(rng, accep ? proposal_state : orig_state, new_trans, spl, prob)
-    
-    return_transition = discard_sample ? nothing : new_trans
-    return return_transition, upd_state
+    state = _da_initial_state(rng, model, initial_params)
+    return _da_step!(rng, state, spl, state.kernel, 1.0, discard_sample)
 end
 
-"""
-    AbstractMCMC.step(rng::AbstractRNG, model::DynamicPPL.Model, spl::AMGS_DA_Sampler, state::AMGSDAState; initial_params=nothing, kwargs...)
-
-Perform a sampling step for the AMGSDA sampler given a state.
-
-# Arguments
-- `rng::AbstractRNG`: The random number generator.
-- `model::DynamicPPL.Model`: The model.
-- `spl::AMGS_DA_Sampler`: The AMGSDA sampler.
-- `state::AMGSDAState`: The current state of the sampler.
-- `kwargs...`: Additional keyword arguments.
-"""
 function AbstractMCMC.step(
     rng::AbstractRNG,
-    model::AbstractMCMC.AbstractModel,
+    model::DynamicPPL.Model,
     spl::AMGS_DA_Sampler,
     state::AMGSDAState;
     discard_sample=false,
-    kwargs...
+    kwargs...,
 )
-    vis = state.varinfo
-    lp_old = state.logjoint_internal
-    # Propose the new parameters and grab the log density
-    proposal_state = propose_amgs(rng, vis, model, spl, state, exp(state.β) .* state.kernel)
-    lp_proposal = proposal_state.logjoint_internal
-
-    # Check whether to accept the new parameters
-    accep = mh_accept_logdens(rng, lp_proposal, lp_old)
-
-    # Construct the transition object to be returned
-    new_trans = accep ? proposal_state.transition : state.transition 
-
-    # Update the kernel and return the new transition and state
-    prob = exp(min(0.0, (lp_proposal - lp_old)))
-    _, new_state = update_kernel(rng, accep ? proposal_state : state, new_trans, spl, prob)
-    return_transition = discard_sample ? nothing : new_trans
-    return return_transition, new_state
+    return _da_step!(rng, state, spl, state.kernel, exp(state.β), discard_sample)
 end
 
+####
+#### Gibbs interface
+####
 
-# # Define assume functions for the AMGSDA sampler
-# function DynamicPPL.assume(
-#     rng::Random.AbstractRNG, spl::AMGS_DA_Sampler, dist::Distribution, vn::DynamicPPL.VarName, vi
-# )
-#     # DynamicPPL.updategid!(vi, vn, spl)
-#     return DynamicPPL.assume(dist, vn, vi)
-# end
+function Turing.Inference.gibbs_update_state!!(
+    ::AMGS_DA_Sampler,
+    state::AMGSDAState,
+    model::DynamicPPL.Model,
+    global_vals::DynamicPPL.VarNamedTuple,
+)
+    new_ldf, θ, logp, transition = gibbs_rebuild(state, model, global_vals)
+    return AMGSDAState(
+        new_ldf,
+        transition,
+        θ,
+        logp,
+        state.μ,
+        state.kernel,
+        state.step,
+        state.β,
+        state.x̄,
+        state.ḡ,
+        state.Δ_cache,
+        state.θ_prop,
+        state.z_cache,
+    )
+end
 
-# Define function to get log evidence
 getlogevidence(transitions, sampler::AMGS_DA_Sampler, state) = missing
-
-"""
-    AbstractMCMC.bundle_samples(ts::Vector{<:DynamicPPL.ParamsWithStats}, model::AbstractMCMC.AbstractModel, spl::AMGS_DA_Sampler, state, chain_type::Type{MCMCChains.Chains}; save_state=false, stats=missing, sort_chain=false, include_varname_to_symbol=true, discard_initial=0, thinning=1, kwargs...)
-
-Bundle the samples from the AMGSDA sampler into an MCMCChains Chain.
-
-# Arguments
-- `ts::Vector{<:DynamicPPL.ParamsWithStats}`: The Vector of transitions.
-- `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::AMGS_DA_Sampler`: The AMGSDA sampler.
-- `state`: The current state of the sampler.
-- `chain_type::Type{MCMCChains.Chains}`: The type of chain.
-- `save_state`: Whether to save the state (default: false).
-- `stats`: The statistics (default: missing).
-- `sort_chain`: Whether to sort the chain (default: false).
-- `include_varname_to_symbol`: Whether to include variable name to symbol mapping (default: true).
-- `discard_initial`: The number of initial samples to discard (default: 0).
-- `thinning`: The thinning interval (default: 1).
-- `kwargs...`: Additional keyword arguments.
-"""
-# function AbstractMCMC.bundle_samples(
-#     ts::Vector{<:DynamicPPL.ParamsWithStats},
-#     model::AbstractMCMC.AbstractModel,
-#     spl::AMGS_DA_Sampler,
-#     state,
-#     chain_type::Type{MCMCChains.Chains};
-#     save_state=false,
-#     stats=missing,
-#     sort_chain=false,
-#     include_varname_to_symbol=true,
-#     discard_initial=0,
-#     thinning=1,
-#     kwargs...,
-# )
-# 
-#     # Convert transitions to array format.
-#     # Also retrieve the variable names.
-#     varnames, vals = _params_to_array(model, ts)
-#     varnames_symbol = map(Symbol, varnames)
-# 
-#     # Get the values of the extra parameters in each transition.
-#     extra_params, extra_values = Turing.Inference.get_transition_extras(ts)
-# 
-#     # Extract names & construct param array.
-#     nms = [varnames_symbol; extra_params]
-#     parray = hcat(vals, extra_values)
-# 
-#     # Get the average or final log evidence, if it exists.
-#     le = getlogevidence(ts, spl, state)
-# 
-#     # Set up the info tuple.
-#     info = NamedTuple()
-# 
-#     if include_varname_to_symbol
-#         info = merge(info, (varname_to_symbol=OrderedDict(zip(varnames, varnames_symbol)),))
-#     end
-# 
-#     if save_state
-#         info = merge(info, (model=model, sampler=spl, samplerstate=state))
-#     end
-# 
-#     # Merge in the timing info, if available
-#     if !ismissing(stats)
-#         info = merge(info, (start_time=stats.start, stop_time=stats.stop))
-#     end
-# 
-#     # Conretize the array before giving it to MCMCChains.
-#     parray = MCMCChains.concretize(parray)
-# 
-#     # Chain construction.
-#     chain = MCMCChains.Chains(
-#         parray,
-#         nms,
-#         (internals=extra_params,);
-#         evidence=le,
-#         info=info,
-#         start=discard_initial + 1,
-#         thin=thinning,
-#     )
-# 
-#     return sort_chain ? sort(chain) : chain
-# end
-# 
-# # Handle setting `nadapts` and `discard_initial`
-# function AbstractMCMC.sample(
-#     rng::AbstractRNG,
-#     model::DynamicPPL.Model,
-#     sampler::AMGS_DA_Sampler,
-#     N::Integer;
-#     chain_type=DynamicPPL.default_chain_type(sampler),
-#     resume_from=nothing,
-#     initial_state=DynamicPPL.loadstate(resume_from),
-#     progress=PROGRESS[],
-#     num_warmup = num_warmup,
-#     discard_initial = discard_initial,
-#     kwargs...,
-# )
-#     if resume_from === nothing
-# 
-#         # If `discard_initial` is `-1`, then users did not specify the keyword argument.
-# 
-#         return AbstractMCMC.mcmcsample(
-#             rng,
-#             model,
-#             sampler,
-#             N;
-#             chain_type=chain_type,
-#             progress=progress,
-#             num_warmup = num_warmup,
-#             discard_initial = discard_initial,
-#             kwargs...,
-#         )
-#     else
-#         return AbstractMCMC.mcmcsample(
-#             rng,
-#             model,
-#             sampler,
-#             N;
-#             chain_type=chain_type,
-#             initial_state=initial_state,
-#             progress=progress,
-#             num_warmup = 0,
-#             discard_initial=0,
-#             kwargs...,
-#         )
-#     end
-# end

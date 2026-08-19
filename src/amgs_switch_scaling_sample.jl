@@ -1,41 +1,77 @@
-#  write a functions step and step_warmup which are used in the AMGS_SGS_sampler.
-# Based on Algorithm 4 in https://link.springer.com/article/10.1007/s11222-008-9110-y
-# But we allow the global scaling algorithm to be set using different schemes.
-# In particular we are interested in the dual averaging scheme from Hoffman and Gelman (2014)
-# https://www.jmlr.org/papers/volume15/hoffman14a/hoffman14a.pdf
-# The idea is to use some method of estimating the scale parameter λ s.t. E[Α(lambda) -α^*] = 0 where α^* is the target acceptance rate and \Alpha is some random variable depending on λ.
+"""
+amgs_switch_scaling_sample.jl
 
-# Start by defining the sampler
+AMGS with a **switchable global-scaling adaptation** rule.
+
+The covariance `Σ` is always adapted by the Robbins–Monro / Haario recursion, as
+in base AMGS. What varies is how the scalar log-scale `β` — the multiplier in
+the proposal covariance `exp(β) Σ` — is driven towards the target acceptance
+rate. The rule is selected by the `method` symbol and dispatched on `Val{method}`
+so the choice is resolved at compile time and costs nothing per iteration.
+
+Available methods (all seek `α = α*`, writing `e = α - α*` and
+`γₜ = (t+1)^(-convergence_step)`):
+
+| `method`  | Update of `β`                                            |
+|:----------|:---------------------------------------------------------|
+| `:RM`     | `β += γₜ e` — plain Robbins–Monro stochastic approximation |
+| `:DA`     | Nesterov dual averaging (Hoffman & Gelman 2014)           |
+| `:EMA`    | exponential moving average towards `β + e`                |
+| `:LOG`    | Robbins–Monro in `u`, reported as `β = log σ(u) < 0`       |
+| `:NR`     | Newton–Raphson: `β += γₜ e / σ²`, `σ² = α(1-α)`            |
+| `:SINR`   | scale-invariant: `β += γₜ e / (√v̂ + ε)`                   |
+| `:CSINR`  | as `:SINR` but with the denominator floored at `σ²`       |
+
+The Newton–Raphson family divides the error by an estimate of its own scale,
+which makes the step size insensitive to how informative each acceptance
+decision is: `σ² = α(1-α)` is the Bernoulli variance of a single accept/reject,
+so `e/σ²` is the natural Newton step for the root-finding problem `E[α] = α*`.
+
+!!! note "`:EMA` is algebraically identical to `:RM`"
+    `β ← (1-γₜ)β + γₜ(β + e)` expands to `β + γₜ e`, exactly the `:RM` update.
+    It is kept as a distinct method because it is named separately in the
+    original design, but it provides no different behaviour.
+
+!!! warning "`:LOG` can only shrink the proposal"
+    `:LOG` sets `β = log(sigmoid(·))`, which is strictly negative, so
+    `exp(β) < 1` always: the scale multiplier can never exceed one. That is only
+    appropriate when the initial covariance is known to be too wide.
+"""
 
 """
-    AMGS_SGS_Sampler(acceptance_rate, convergence_step; use_noise_stabiliser=false, noise_scaling=1e-6, μ=0.0, γ=0.05, t0=10.0, κ=0.75)
+    AMGS_SGS_Sampler(acceptance_rate, convergence_step; method=:DA, ...)
+    AMGS_SGS_Sampler(acceptance_rate, convergence_step, use_noise_stabiliser,
+                     noise_scaling; method=:DA, ...)
 
-Data Augmentation variant of the Adaptive Metropolis-within-Gibbs sampler.
-
-This sampler implements an adaptive MCMC algorithm designed for data augmentation
-contexts, using additional adaptation parameters for improved performance in
-hierarchical models or models with latent variables.
+AMGS with a selectable global-scaling adaptation rule.
 
 # Fields
-- `acceptance_rate::Real`: target acceptance rate for the Robbins–Monro update.
-- `convergence_step::Real`: controls the step-size decay in adaptation (power).
-- `use_noise_stabiliser::Val{Bool}`: fast-dispatch flag to optionally add noise.
-- `noise_scaling::Real`: variance scale used by the optional noise stabiliser.
-- `μ::Real`: adaptation parameter for mean updates.
-- `γ::Real`: adaptation parameter for covariance scaling.
-- `t0::Real`: initial adaptation time parameter.
-- `κ::Real`: adaptation decay parameter.
+- `acceptance_rate::Real`: target acceptance rate `α*`.
+- `convergence_step::Real`: Robbins–Monro decay exponent, used for both the
+  covariance update and the `γₜ` gain of the scaling rules.
+- `use_noise_stabiliser::Val{Bool}`, `noise_scaling::Real`: optional covariance
+  noise stabiliser (see [`add_noise!`](@ref)).
+- `μ`, `γ`, `t0`, `κ`: dual-averaging parameters (`:DA`); `γ` doubles as the
+  exponential-moving-average rate for the variance estimate `v̂` used by `:SINR`
+  and `:CSINR`.
+- `method::Val{Symbol}`: which scaling rule to use.
 
-# Examples
+# Example
 ```julia
-sampler = AMGS_SGS_Sampler(0.234, 1000)
-chain = sample(model, sampler, 1000)
+spl = AMGS_SGS_Sampler(0.234, 0.6; method = :NR)
 ```
-
-TODO: Add detailed explanation of data augmentation context and parameter meanings.
-TODO: Explain the adaptation scheme differences from standard AMGS.
 """
-struct AMGS_SGS_Sampler{ T_accep <: Real, T_conv_step <: Real, T_scale <: Real, T_B, T_μ <: Real, T_γ <: Real, T_t <: Real, T_κ <: Real, M} <: AbstractMCMC.AbstractSampler
+struct AMGS_SGS_Sampler{
+    T_accep<:Real,
+    T_conv_step<:Real,
+    T_scale<:Real,
+    T_B,
+    T_μ<:Real,
+    T_γ<:Real,
+    T_t<:Real,
+    T_κ<:Real,
+    M,
+} <: AbstractMCMC.AbstractSampler
     acceptance_rate::T_accep
     convergence_step::T_conv_step
     use_noise_stabiliser::Val{T_B}
@@ -47,601 +83,468 @@ struct AMGS_SGS_Sampler{ T_accep <: Real, T_conv_step <: Real, T_scale <: Real, 
     method::Val{M}
 end
 
-function AMGS_SGS_Sampler(
-    acceptance_rate::T1,
-    convergence_step::T2;
-    method::Symbol = :DA
-) where {T1 <: Real, T2 <: Real}
-return AMGS_SGS_Sampler(acceptance_rate, convergence_step, Val(false), 1e-6, 0.0, 0.05, 10.0, 0.75, Val(method))
-end
+"The scaling rules this sampler understands."
+const SGS_METHODS = (:RM, :DA, :EMA, :LOG, :NR, :SINR, :CSINR)
 
 function AMGS_SGS_Sampler(
     acceptance_rate::T1,
     convergence_step::T2,
-    use_noise_stabiliser::Bool,
-    noise_scaling::T3;
-    method::Symbol = :DA
-) where {T1 <: Real, T2 <: Real, T3 <: Real }
-return AMGS_SGS_Sampler(acceptance_rate, convergence_step, Val(use_noise_stabiliser), noise_scaling, 0.0, 0.05, 10.0, 0.75, Val(method))
+    use_noise_stabiliser::Bool=false,
+    noise_scaling::Real=1e-6;
+    method::Symbol=:DA,
+    μ::Real=0.0,
+    γ::Real=0.05,
+    t0::Real=10.0,
+    κ::Real=0.75,
+) where {T1<:Real,T2<:Real}
+    method in SGS_METHODS ||
+        throw(ArgumentError("unknown method $method; expected one of $(SGS_METHODS)"))
+    γ > 0 || throw(ArgumentError("γ must be positive"))
+    t0 > 0 || throw(ArgumentError("t0 must be positive"))
+    0.5 < κ <= 1 || throw(ArgumentError("κ must lie in (0.5, 1]"))
+    return AMGS_SGS_Sampler(
+        acceptance_rate,
+        convergence_step,
+        Val(use_noise_stabiliser),
+        noise_scaling,
+        μ,
+        γ,
+        t0,
+        κ,
+        Val(method),
+    )
 end
 
+####
+#### Global-scaling adaptation states
+####
 
-# DynamicPPL.default_chain_type(sampler::AMGS_SGS_Sampler) = MCMCChains.Chains
+"""
+    GlobalScalingAdaptationState{T}
 
-# Define the state of the global scale adaptation
+Supertype of the per-method state carried by the global-scaling rules. Every
+subtype stores at least the current log-scale `β`; methods that need extra
+accumulators (dual averaging, the scale-invariant Newton rules) add them.
+"""
 abstract type GlobalScalingAdaptationState{T<:Real} end
 
+"Plain Robbins–Monro: only the log-scale is carried."
 struct RobbinsMonroState{T<:Real} <: GlobalScalingAdaptationState{T}
     β::T
 end
 
+"Dual averaging: the averaged iterate `β` plus the averaged error `ḡ`."
 struct DualAveragingState{T<:Real} <: GlobalScalingAdaptationState{T}
     β::T
-    ḡ::T
+    ḡ::T
 end
 
+"Exponential moving average (algebraically the same as `RobbinsMonroState`)."
 struct ExponentialMovingAverageState{T<:Real} <: GlobalScalingAdaptationState{T}
     β::T
 end
 
+"""
+Robbins–Monro accumulated in an unconstrained variable `u`, with the reported
+log-scale `β = log(sigmoid(u))` (always negative, so `exp(β) < 1`).
+
+Keeping `u` separate from `β` is essential: feeding `β` back into its own
+Robbins–Monro update composes `log∘sigmoid` with itself once per iteration, and
+that map has no fixed point — it drives the scale to zero regardless of the
+acceptance rate.
+"""
 struct LogisticRobbinsMonroState{T<:Real} <: GlobalScalingAdaptationState{T}
     β::T
+    u::T
 end
 
+"Newton–Raphson Robbins–Monro, dividing the error by the Bernoulli variance."
 struct NewtonRaphsonRobbinsMonroState{T<:Real} <: GlobalScalingAdaptationState{T}
     β::T
 end
 
-struct ScaleInvariantNewtonRaphsonRobbinsMonroState{T<:Real} <: GlobalScalingAdaptationState{T}
+"Scale-invariant Newton–Raphson: carries the running error variance `v̂`."
+struct ScaleInvariantNewtonRaphsonRobbinsMonroState{T<:Real} <:
+       GlobalScalingAdaptationState{T}
     β::T
     v̂::T
 end
 
-# Type-parametric initializers
-init_global_adaptation_state(::Val{:RM}, ::Type{T}) where {T<:Real} = RobbinsMonroState{T}(zero(T))
-init_global_adaptation_state(::Val{:DA}, ::Type{T}) where {T<:Real} = DualAveragingState{T}(zero(T), zero(T))
-init_global_adaptation_state(::Val{:EMA}, ::Type{T}) where {T<:Real} = ExponentialMovingAverageState{T}(zero(T))
-init_global_adaptation_state(::Val{:LOG}, ::Type{T}) where {T<:Real} = LogisticRobbinsMonroState{T}(zero(T))
-init_global_adaptation_state(::Val{:NR}, ::Type{T}) where {T<:Real} = NewtonRaphsonRobbinsMonroState{T}(zero(T))
-init_global_adaptation_state(::Val{:SINR}, ::Type{T}) where {T<:Real} = ScaleInvariantNewtonRaphsonRobbinsMonroState{T}(zero(T), one(T))
-init_global_adaptation_state(::Val{:CSINR}, ::Type{T}) where {T<:Real} = ScaleInvariantNewtonRaphsonRobbinsMonroState{T}(zero(T), one(T))
+"The current log-scale of any adaptation state."
+get_beta(s::GlobalScalingAdaptationState) = s.β
 
-# Define the state of the sampler
-# Contains Important quantities for computation of the updated kernel
-"""
-    AMGSSGSState
+init_global_adaptation_state(::Val{:RM}, ::Type{T}) where {T<:Real} =
+    RobbinsMonroState{T}(zero(T))
+init_global_adaptation_state(::Val{:DA}, ::Type{T}) where {T<:Real} =
+    DualAveragingState{T}(zero(T), zero(T))
+init_global_adaptation_state(::Val{:EMA}, ::Type{T}) where {T<:Real} =
+    ExponentialMovingAverageState{T}(zero(T))
+init_global_adaptation_state(::Val{:LOG}, ::Type{T}) where {T<:Real} =
+    LogisticRobbinsMonroState{T}(T(log(one(T) / 2)), zero(T))
+init_global_adaptation_state(::Val{:NR}, ::Type{T}) where {T<:Real} =
+    NewtonRaphsonRobbinsMonroState{T}(zero(T))
+init_global_adaptation_state(::Val{:SINR}, ::Type{T}) where {T<:Real} =
+    ScaleInvariantNewtonRaphsonRobbinsMonroState{T}(zero(T), one(T))
+init_global_adaptation_state(::Val{:CSINR}, ::Type{T}) where {T<:Real} =
+    ScaleInvariantNewtonRaphsonRobbinsMonroState{T}(zero(T), one(T))
 
-State container used by the AMGS Data Augmentation sampler to store running statistics
-required for adaptation in data augmentation contexts.
-
-# Fields
-- `transition`: the latest `DynamicPPL.ParamsWithStats` object.
-- `varinfo`: the `VarInfo` corresponding to the current parameter values.
-- `μ`: running mean vector of parameters.
-- `kernel`: running covariance (or scale) matrix used for proposals.
-- `step`: integer step counter for adaptation scheduling.
-- `logjoint_internal`: cached log joint density for the current state.
-- `Δ_cache`: preallocated buffer used for delta computations.
-"""
-struct AMGSSGSState{
-    TTrans<:DynamicPPL.ParamsWithStats,
-    TVI<:AbstractVarInfo,
-    Tμ<:AbstractVector,
-    TKernel<:AbstractMatrix,
-    TStep<:Integer,
-    TL<:Real,
-    T_GSAS <: GlobalScalingAdaptationState
-}
-    transition::TTrans
-    varinfo::TVI
-    μ::Tμ
-    kernel::TKernel
-    step::TStep
-    logjoint_internal::TL
-    Δ_cache::Tμ
-    global_scale_adaptation_state::T_GSAS
-end
-
-# Define the initial state of the sampler
-"""
-    init_AMGSSGSState(transition::T_trans, μ::Vector{T_μ}, kernel::T_kernel) where {T_trans <: DynamicPPL.ParamsWithStats, T_μ <: Real, T_kernel <: AbstractMatrix}
-
-Initialize the state of the AMGSSGS sampler with the given transition, mean vector μ, and kernel matrix.
-
-# Arguments
-- `transition::T_trans`: The initial transition object.
-- `μ::Vector{T_μ}`: The initial mean vector.
-- `kernel::T_kernel`: The initial kernel matrix.
-"""
-function init_AMGSSGSState(
-    transition::T_trans,
-    varinfo::TVI,
-    μ::Vector{T_μ},
-    kernel::T_kernel,
-    spl::AMGS_SGS_Sampler
-    ) where {T_trans <: DynamicPPL.ParamsWithStats, TVI <: AbstractVarInfo, T_μ <: Real, T_kernel <: AbstractMatrix} 
-    ## copy vector length of mu and initialise zero vector for beta
-    step = 1
-    lp = DynamicPPL.getlogjoint_internal(varinfo) # Get the log joint density
-    method_state = init_global_adaptation_state(spl.method, eltype(μ))
-    AMGSSGSState{T_trans, TVI, typeof(μ), T_kernel, Int, typeof(lp), typeof(method_state)}(transition, varinfo, μ, kernel, step,  lp, similar(μ), method_state)
-end
+####
+#### The scaling rules
+####
 
 """
-    init_AMGSSGSState(transition::T_trans, μ::T_μ, kernel::T_kernel) where {T_trans <: DynamicPPL.ParamsWithStats, T_μ <: Real, T_kernel <: AbstractMatrix}
+    adapt_scale(method, spl, method_state, step, prob)
 
-Initialize the state of the AMGSSGS sampler with the given transition, mean value μ, and kernel matrix for a 1D case.
-
-# Arguments
-- `transition::T_trans`: The initial transition object.
-- `μ::T_μ`: The initial mean value.
-- `kernel::T_kernel`: The initial kernel matrix.
+Advance the global log-scale by one iteration under the selected rule, returning
+a new adaptation state. `prob` is the realised MH acceptance probability of the
+step just taken.
 """
-function init_AMGSSGSState(
-    transition::T_trans,
-    varinfo::TVI,
-    μ::T_μ,
-    kernel::T_kernel,
-    spl::AMGS_SGS_Sampler
-    ) where {T_trans <: DynamicPPL.ParamsWithStats, TVI <: AbstractVarInfo, T_μ <: Real, T_kernel <: AbstractMatrix} 
-    ## copy vector length of mu and initialise zero vector for beta
-    step = 1
-    new_μ = [μ]
-    lp = DynamicPPL.getlogjoint_internal(varinfo) # Get the log joint density
-    method_state = init_global_adaptation_state(spl.method, eltype(μ))
-    AMGSSGSState{T_trans, TVI, typeof(new_μ), T_kernel, Int, typeof(lp), typeof(method_state)}(transition, varinfo, new_μ, kernel, step, lp, similar(μ), method_state)
-end
-
-"""
-    update_kernel(rng::TRNG, state::AMGSSGSState, trans::T, spl::AMGS_SGS_Sampler, prob::T3) where {T <: DynamicPPL.ParamsWithStats, T3 <: Real, TRNG <: AbstractRNG}
-
-Update the kernel matrix, and internal quantities of the AMGSSGS sampler state based on the new transition and acceptance probability.
-
-# Arguments
-- `state::AMGSSGSState`: The current state of the sampler.
-- `trans::T`: The new transition object.
-- `spl::AMGS_SGS_Sampler`: The AMGSSGS sampler.
-- `prob::T3`: The acceptance probability.
-"""
-function update_kernel(rng::TRNG, state::AMGSSGSState, trans::T, spl::AMGS_SGS_Sampler, prob::T3) where {T <: DynamicPPL.ParamsWithStats, T3 <: Real, TRNG <: AbstractRNG}
-    μ    = state.μ
-    step = state.step
-    state.Δ_cache .= state.varinfo[:]
-    n    = length(state.Δ_cache)
-
-    # Robbins–Monro gain
-    @fastmath begin
-        η = (step + 1.0)^(-spl.convergence_step)
-
-        # Update running mean μ ← (1−η)μ + ηθ
-        @. μ += η * (state.Δ_cache - μ)
-
-        # Δ = θ - μ (store in preallocated buffer Δ in the state)
-        @. state.Δ_cache -= μ
-
-        # Outer product update, symmetric and in-place:
-        @inbounds for i in 1:n
-            Δi = state.Δ_cache[i]
-            for j in i:n
-                state.kernel[i,j] += η * (Δi * state.Δ_cache[j] - state.kernel[i,j])
-                state.kernel[j,i] = state.kernel[i,j]  # preserve symmetry
-            end
-        end
-
-        # Optional noise stabilisation (fast Val dispatch)
-        @inline _add_noise!(rng, state.kernel, spl.noise_scaling, n, spl.use_noise_stabiliser)
-
-    end
-
-    method_state = adapt_scale(spl.method, spl, state.global_scale_adaptation_state, step, prob)
-    return state.kernel, AMGSSGSState(trans, state.varinfo, μ, state.kernel, step + 1, state.logjoint_internal, state.Δ_cache, method_state)
-end
+function adapt_scale end
 
 function adapt_scale(::Val{:RM}, spl, method_state, step, prob)
-        γt = (step + 1.0)^(-spl.convergence_step)
-        newβ = method_state.β + γt * (prob - spl.acceptance_rate)
-        return RobbinsMonroState{typeof(newβ)}(newβ)
+    γt = (step + 1.0)^(-spl.convergence_step)
+    newβ = method_state.β + γt * (prob - spl.acceptance_rate)
+    return RobbinsMonroState{typeof(newβ)}(newβ)
 end
 
-# Hoffman Gelman dual averaging scheme
-# https://www.jmlr.org/papers/volume15/hoffman14a/hoffman14a.pdf
+# Nesterov dual averaging, Hoffman & Gelman (2014), JMLR 15, Algorithm 6.
 function adapt_scale(::Val{:DA}, spl, method_state, step, prob)
-        ## Dual averaging step
-        Ht = spl.acceptance_rate - prob
-        ḡ = (1 - 1/(step + spl.t0)) * method_state.ḡ + (1/(step + spl.t0)) * Ht
-        x = spl.μ - ((sqrt(step) / spl.γ) * ḡ)
-        x̄ = step^(-spl.κ) * x + (1 - step^(-spl.κ)) * method_state.β
-        return DualAveragingState{typeof(x̄)}(x̄, ḡ)
+    Ht = spl.acceptance_rate - prob
+    w = 1 / (step + spl.t0)
+    ḡ = (1 - w) * method_state.ḡ + w * Ht
+    x = spl.μ - ((sqrt(step) / spl.γ) * ḡ)
+    decay = step^(-spl.κ)
+    x̄ = decay * x + (1 - decay) * method_state.β
+    return DualAveragingState{typeof(x̄)}(x̄, ḡ)
 end
-   
-# Currently equivalent to RM
+
+# Exponential moving average towards `β + e`. Expanding the convex combination
+# gives β + η(prob - α*), i.e. exactly the `:RM` update -- see the module note.
 function adapt_scale(::Val{:EMA}, spl, method_state, step, prob)
     η = (step + 1.0)^(-spl.convergence_step)
     target = method_state.β + (prob - spl.acceptance_rate)
     newβ = (1 - η) * method_state.β + η * target
     return ExponentialMovingAverageState{typeof(newβ)}(newβ)
 end
-    
+
+# Robbins-Monro accumulated in the unconstrained `u`, then squashed to a
+# bounded log-scale. The result is always negative, so this rule can only ever
+# shrink the proposal relative to `Σ`.
+#
+# NOTE: the original applied `log∘sigmoid` to the accumulator itself, so each
+# iteration re-squashed an already-squashed value. That composition has no fixed
+# point -- it drives β to -Inf and the chain grinds to a halt at acceptance 1.0
+# regardless of the target. Accumulating in `u` and squashing only the reported
+# value preserves the intended bounded parameterisation.
 function adapt_scale(::Val{:LOG}, spl, method_state, step, prob)
     γt = (step + 1.0)^(-spl.convergence_step)
-    tmp = method_state.β + γt * (prob - spl.acceptance_rate)
-    newβ = log(1 / (1 + exp(-tmp)))
-    return LogisticRobbinsMonroState{typeof(newβ)}(newβ)
+    u = method_state.u + γt * (prob - spl.acceptance_rate)
+    newβ = -log1p(exp(-u))              # == log(sigmoid(u)), numerically stable
+    return LogisticRobbinsMonroState{typeof(newβ)}(newβ, u)
 end
 
+# Newton-Raphson: divide the acceptance error by the Bernoulli variance of a
+# single accept/reject decision, α(1-α).
+#
+# NOTE: the variance is floored at α*(1-α*), the Bernoulli variance *at the
+# target* -- i.e. the curvature at the root the method is seeking. The original
+# floored it at 1e-4, which is degenerate: whenever a proposal is certain to be
+# accepted `prob` is exactly 1.0, so α(1-α) is exactly 0, the floor engages, and
+# the update takes a step of order γₜ·e/1e-4 ≈ 5000 in log-scale. That overflows
+# `exp(β)` to `Inf` on the very first iterations and the sampler returns NaN.
 function adapt_scale(::Val{:NR}, spl, method_state, step, prob)
-        γt = (step + 1.0)^(-spl.convergence_step)
-        σ2 = clamp(abs(prob * (1 - prob)), 1e-4, 0.25)
-        newβ = method_state.β + γt * ((prob - spl.acceptance_rate) / σ2)
-        return NewtonRaphsonRobbinsMonroState{typeof(newβ)}(newβ)
+    γt = (step + 1.0)^(-spl.convergence_step)
+    floor_σ2 = spl.acceptance_rate * (1 - spl.acceptance_rate)
+    σ2 = clamp(abs(prob * (1 - prob)), floor_σ2, 0.25)
+    newβ = method_state.β + γt * ((prob - spl.acceptance_rate) / σ2)
+    return NewtonRaphsonRobbinsMonroState{typeof(newβ)}(newβ)
 end
 
+# Scale-invariant Newton-Raphson: normalise the step by a running estimate `v̂`
+# of the squared acceptance error, in the manner of RMSProp/Adam.
+#
+# NOTE: `v̂` accumulates `(prob - acceptance_rate)^2`. The original code squared
+# `(prob - convergence_step)` here, which compared an acceptance probability
+# against the Robbins-Monro *decay exponent* -- two unrelated quantities. With
+# the usual settings (α* = 0.234, convergence_step = 0.6) that inflated `v̂` and
+# systematically damped the update.
 function adapt_scale(::Val{:SINR}, spl, method_state, step, prob)
-        γt = (step + 1.0)^(-spl.convergence_step)
-        v̂ = (1 - spl.γ) * method_state.v̂ + spl.γ * (prob - spl.convergence_step)^2
-        newβ = method_state.β + γt * ((prob - spl.acceptance_rate) / (sqrt(v̂) + 1e-6))
-        return ScaleInvariantNewtonRaphsonRobbinsMonroState{typeof(newβ)}(newβ, v̂)
+    γt = (step + 1.0)^(-spl.convergence_step)
+    err = prob - spl.acceptance_rate
+    v̂ = (1 - spl.γ) * method_state.v̂ + spl.γ * err^2
+    newβ = method_state.β + γt * (err / (sqrt(v̂) + 1e-6))
+    return ScaleInvariantNewtonRaphsonRobbinsMonroState{typeof(newβ)}(newβ, v̂)
 end
 
+# As `:SINR`, but the denominator is floored at the Bernoulli variance so the
+# step cannot blow up when the error estimate is momentarily tiny.
 function adapt_scale(::Val{:CSINR}, spl, method_state, step, prob)
-        γt = (step + 1.0)^(-spl.convergence_step)
-        σ2 = clamp(prob * (1 - prob), 1e-4, 0.25)
-        v̂ = (1 - spl.γ) * method_state.v̂ + spl.γ * (prob - spl.convergence_step)^2
-        denom = max(sqrt(v̂), σ2)
-        newβ = method_state.β + γt * ((prob - spl.acceptance_rate) / denom)
-        return ScaleInvariantNewtonRaphsonRobbinsMonroState{typeof(newβ)}(newβ, v̂)
+    γt = (step + 1.0)^(-spl.convergence_step)
+    σ2 = clamp(prob * (1 - prob), spl.acceptance_rate * (1 - spl.acceptance_rate), 0.25)
+    err = prob - spl.acceptance_rate
+    v̂ = (1 - spl.γ) * method_state.v̂ + spl.γ * err^2
+    denom = max(sqrt(v̂), σ2)
+    newβ = method_state.β + γt * (err / denom)
+    return ScaleInvariantNewtonRaphsonRobbinsMonroState{typeof(newβ)}(newβ, v̂)
 end
 
-# Function to set the new parameters (for use with gibbs sampler)
-Turing.Inference.isgibbscomponent(::AMGS_SGS_Sampler) = true 
+####
+#### State
+####
 
-Turing.Inference.init_strategy(::AMGS_SGS_Sampler) = Turing.Inference.InitFromPrior()
-
-# Get varinfo
-function Turing.Inference.get_varinfo(state::T) where {T<:AMGSSGSState}
-    return state.varinfo
-end
-
-function Turing.Inference.setparams_varinfo!!(
-    model::DynamicPPL.Model,
-    sampler::AMGS_SGS_Sampler,
-    state::AMGSSGSState,
-    params::AbstractVarInfo,
-)
-
-    # Update the vi
-    vi  = last(DynamicPPL.evaluate!!(model, params)) 
-
-    lp = DynamicPPL.getlogjoint_internal(vi)
-
-    # #update the model state
-    new_transition = DynamicPPL.ParamsWithStats(vi, model)
-    new_state = AMGSSGSState(new_transition, vi, state.μ, state.kernel, state.step, lp, state.Δ_cache, state.global_scale_adaptation_state)
-    
-    # Update the VarInfo with the new log density
-    return new_state
-end
-
-# Write a function which proposes a new set of parameters
 """
-    propose_amgs(rng::AbstractRNG, vi::AbstractVarInfo, model::AbstractMCMC.AbstractModel, spl::AMGS_SGS_Sampler, Σ::AbstractMatrix)
+    AMGSSGSState
 
-Propose a new set of parameters for the AMGSSGS sampler.
+State for [`AMGS_SGS_Sampler`](@ref).
 
-# Arguments
-- `rng::AbstractRNG`: The random number generator.
-- `vi::AbstractVarInfo`: The variable information.
-- `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::AMGS_SGS_Sampler`: The AMGSSGS sampler.
-- `state::AMGSSGSState`: The current state of the sampler.
-- `Σ::AbstractMatrix`: The covariance matrix for the proposal.
+Identical to [`AMGSState`](@ref) except that the scalar log-scale lives inside
+`global_scale_adaptation_state`, whose concrete type depends on the selected
+method. `β` mirrors that state's current log-scale so the generic helpers can
+read it uniformly.
 """
-function propose_amgs(
-    rng::AbstractRNG,
-    vi::AbstractVarInfo,
-    model::AbstractMCMC.AbstractModel,
+struct AMGSSGSState{
+    TLDF<:DynamicPPL.LogDensityFunction,
+    TTrans<:DynamicPPL.ParamsWithStats,
+    Tθ<:AbstractVector,
+    TKernel<:AbstractMatrix,
+    TStep<:Integer,
+    Tβ<:Real,
+    TL<:Real,
+    T_GSAS<:GlobalScalingAdaptationState,
+} <: AbstractAMGSState
+    ldf::TLDF
+    transition::TTrans
+    θ::Tθ
+    logp::TL
+    μ::Tθ
+    kernel::TKernel
+    step::TStep
+    β::Tβ
+    global_scale_adaptation_state::T_GSAS
+    Δ_cache::Tθ
+    θ_prop::Tθ
+    z_cache::Tθ
+end
+
+"""
+    init_AMGSSGSState(ldf, transition, θ, logp, kernel, spl)
+
+Build the initial switch-scaling state, including the method-specific adaptation
+state. The step counter starts at 1, never 0, because the dual-averaging
+smoothing weight `t^(-κ)` is infinite at `t = 0`.
+"""
+function init_AMGSSGSState(
+    ldf::DynamicPPL.LogDensityFunction,
+    transition::DynamicPPL.ParamsWithStats,
+    θ::AbstractVector,
+    logp::Real,
+    kernel::AbstractMatrix,
     spl::AMGS_SGS_Sampler,
-    state::AMGSSGSState,
-    Σ::AbstractMatrix
 )
-    # Grab the parameters we are performing inference on
-    state.Δ_cache .= vi[:]
-    
-    # Propose a new set of parameters
-    proposal = proposewalk(rng, state.Δ_cache, Σ)
-    
-    proposal_vi = DynamicPPL.unflatten(vi, proposal)
-
-    # Call a function to update the varinfo and evaluate the logdensity
-    return Turing.Inference.setparams_varinfo!!(model, spl, state, proposal_vi) 
+    method_state = init_global_adaptation_state(spl.method, eltype(θ))
+    return AMGSSGSState(
+        ldf,
+        transition,
+        θ,
+        logp,
+        copy(θ),
+        kernel,
+        1,
+        get_beta(method_state),
+        method_state,
+        similar(θ),
+        similar(θ),
+        similar(θ),
+    )
 end
 
 """
-    AbstractMCMC.step_warmup(rng::AbstractRNG, model::AbstractMCMC.AbstractModel, spl::AMGS_SGS_Sampler; initial_params=nothing, kwargs...)
+    update_kernel!(rng, state, spl, prob)
 
-Perform an initial warmup step for the AMGSSGS sampler.
+Adapt the covariance by Robbins–Monro (Andrieu & Thoms Algorithm 4) and the
+global log-scale by the selected rule.
 
-# Arguments
-- `rng::AbstractRNG`: The random number generator.
-- `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::AMGS_SGS_Sampler`: The AMGSSGS sampler.
-- `initial_params`: The initial parameters (optional).
-- `kwargs...`: Additional keyword arguments.
+Returns `(Σ, method_state)`; `μ` and `Σ` are mutated in place.
 """
-function AbstractMCMC.step_warmup(
-    rng::AbstractRNG,
-    model::AbstractMCMC.AbstractModel,
-    spl::AMGS_SGS_Sampler;
-    initial_params=Turing.Inference.init_strategy(spl),
-    discard_sample = false,
-    kwargs...,
+function update_kernel!(
+    rng::AbstractRNG, state::AMGSSGSState, spl::AMGS_SGS_Sampler, prob::Real
 )
-
-    vis = DynamicPPL.VarInfo(model)
-    _, vis = DynamicPPL.init!!(rng, model, vis, initial_params)
-    # If we're doing random walk with a covariance matrix,
-    # just link everything before sampling.
-    # vis = DynamicPPL.default_varinfo(rng, model, spl)
-
-    # # If there are initial parameters, set them and the logdensity
-    # if initial_params !== nothing
-    #     vis = DynamicPPL.initialize_parameters!!(vis, initial_params, model)
-    #     vis = last(DynamicPPL.evaluate!!(model, vis))
-    # end
-
-    # Link the variables
-    DynamicPPL.link!!(vis, model)
-    DynamicPPL.evaluate!!(model, vis)
-
-    # Get the log density of the current parameters
-    lp_old = DynamicPPL.getlogjoint_internal(vis)
-    prev_transition = DynamicPPL.ParamsWithStats(model, vis)
-
-    # Get the parameters of interest and create the covariance matrix
-    theta = vis[:]
-    Σ = diagm(0.01 .* abs.(theta) .+ 1e-6)
-
-    # get the old state:
-    orig_state = init_AMGSSGSState(prev_transition, vis, theta, Σ, spl)
-
-    # Propose a new set of parameters and grab the log density
-    new_state = propose_amgs(rng, vis, model, spl, orig_state, Σ)
-    lp_proposal = new_state.logjoint_internal
-
-    # Check whether to accept the new parameters and return the previous transition if not
-    accep = mh_accept_logdens(rng, lp_proposal, lp_old)
-    return_transition = discard_sample ? nothing : (accep ? new_state.transition : prev_transition)
-    return return_transition, accep ? new_state : orig_state
-end
-
-"""
-    AbstractMCMC.step_warmup(rng::AbstractRNG, model::AbstractMCMC.AbstractModel, spl::AMGS_SGS_Sampler, state::AMGSSGSState; initial_params=nothing, kwargs...)
-
-Perform a warmup step for the AMGSSGS sampler for a given state.
-
-# Arguments
-- `rng::AbstractRNG`: The random number generator.
-- `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::AMGS_SGS_Sampler`: The AMGSSGS sampler.
-- `state::AMGSSGSState`: The current state of the sampler.
-- `kwargs...`: Additional keyword arguments.
-"""
-function AbstractMCMC.step_warmup(
-    rng::AbstractRNG,
-    model::AbstractMCMC.AbstractModel,
-    spl::AMGS_SGS_Sampler,
-    state::AMGSSGSState;
-    discard_sample = false,
-    kwargs...
-)
-    # Grab the VarInfo and logdensity of the current parameters
-    vis = state.varinfo
-    lp_old = state.logjoint_internal
-
-    # Get the kernel
+    μ = state.μ
     Σ = state.kernel
+    Δ = state.Δ_cache
+    n = length(Δ)
 
-    # Propose the new parameters and get the log density
-    proposal_state = propose_amgs(rng, vis, model, spl, state, Σ)
-    lp_proposal = proposal_state.logjoint_internal 
+    @fastmath begin
+        η = (state.step + 1.0)^(-spl.convergence_step)
 
-    # Check whether to accept the new parameters and return the previous transition if not
-    accep = mh_accept_logdens(rng, lp_proposal, lp_old)
-    return_transition = discard_sample ? nothing : (accep ? proposal_state.transition : state.transition)
-    return return_transition, accep ? proposal_state : state
+        # Residual against the mean *before* it is updated, then advance the
+        # mean -- the ordering specified in the AMGS pseudocode (Algorithm 1)
+        # and Andrieu & Thoms Algorithm 4. See `update_kernel!` in
+        # amgs_sample.jl for the full recursion.
+        @inbounds @simd for i in 1:n
+            Δ[i] = state.θ[i] - μ[i]
+        end
+        @inbounds @simd for i in 1:n
+            μ[i] += η * Δ[i]
+        end
+        @inbounds for i in 1:n
+            Δi = Δ[i]
+            for j in i:n
+                Σ[i, j] += η * (Δi * Δ[j] - Σ[i, j])
+                Σ[j, i] = Σ[i, j]
+            end
+        end
+        add_noise!(rng, Σ, spl.noise_scaling, n, spl.use_noise_stabiliser)
+    end
+
+    method_state = adapt_scale(
+        spl.method, spl, state.global_scale_adaptation_state, state.step, prob
+    )
+    return Σ, method_state
+end
+
+####
+#### Sampler interface
+####
+
+Turing.Inference.isgibbscomponent(::AMGS_SGS_Sampler) = true
+Turing.Inference.init_strategy(::AMGS_SGS_Sampler) = DynamicPPL.InitFromPrior()
+
+function _sgs_initial_state(
+    rng::AbstractRNG, model::DynamicPPL.Model, spl::AMGS_SGS_Sampler, initial_params
+)
+    ldf = build_ldf(model, rng, initial_params)
+    θ = initial_theta(ldf)
+    logp = LogDensityProblems.logdensity(ldf, θ)
+    transition = DynamicPPL.ParamsWithStats(θ, ldf, (; accepted=true))
+    return init_AMGSSGSState(ldf, transition, θ, logp, initial_kernel(θ), spl)
 end
 
 """
-    AbstractMCMC.step(rng::AbstractRNG, model::DynamicPPL.Model, spl::AMGS_SGS_Sampler; initial_params=nothing, kwargs...)
+    _sgs_step!(rng, state, spl, Σ, discard_sample)
 
-Perform an initial sampling step for the AMGSSGS sampler.
-
-# Arguments
-- `rng::AbstractRNG`: The random number generator.
-- `model::DynamicPPL.Model`: The model.
-- `spl::AMGS_SGS_Sampler`: The AMGSSGS sampler.
-- `initial_params`: The initial parameters (optional).
-- `kwargs...`: Additional keyword arguments.
+One iteration: propose, accept/reject, then adapt the covariance and the global
+scale under the selected rule.
 """
+function _sgs_step!(
+    rng::AbstractRNG,
+    state::AMGSSGSState,
+    spl::AMGS_SGS_Sampler,
+    Σ::AbstractMatrix,
+    scale::Real,
+    discard_sample::Bool,
+)
+    accep, logp, prob = metropolis_move!(rng, state, Σ, scale)
+    _, method_state = update_kernel!(rng, state, spl, prob)
+
+    moved = AMGSSGSState(
+        state.ldf,
+        state.transition,
+        state.θ,
+        logp,
+        state.μ,
+        state.kernel,
+        state.step + 1,
+        get_beta(method_state),
+        method_state,
+        state.Δ_cache,
+        state.θ_prop,
+        state.z_cache,
+    )
+
+    # Keep the transition cache consistent with the position regardless of
+    # `discard_sample`, which only suppresses what is returned.
+    transition = accep ? make_transition(moved, true) : reuse_transition(moved, false)
+
+    new_state = AMGSSGSState(
+        moved.ldf,
+        transition,
+        moved.θ,
+        moved.logp,
+        moved.μ,
+        moved.kernel,
+        moved.step,
+        moved.β,
+        moved.global_scale_adaptation_state,
+        moved.Δ_cache,
+        moved.θ_prop,
+        moved.z_cache,
+    )
+
+    return (discard_sample ? nothing : transition), new_state
+end
+
+function AbstractMCMC.step_warmup(
+    rng::AbstractRNG,
+    model::DynamicPPL.Model,
+    spl::AMGS_SGS_Sampler;
+    initial_params=Turing.Inference.init_strategy(spl),
+    discard_sample=false,
+    kwargs...,
+)
+    state = _sgs_initial_state(rng, model, spl, initial_params)
+    return _sgs_step!(rng, state, spl, state.kernel, 1.0, discard_sample)
+end
+
+function AbstractMCMC.step_warmup(
+    rng::AbstractRNG,
+    model::DynamicPPL.Model,
+    spl::AMGS_SGS_Sampler,
+    state::AMGSSGSState;
+    discard_sample=false,
+    kwargs...,
+)
+    return _sgs_step!(rng, state, spl, state.kernel, exp(state.β), discard_sample)
+end
+
 function AbstractMCMC.step(
     rng::AbstractRNG,
     model::DynamicPPL.Model,
     spl::AMGS_SGS_Sampler;
     initial_params=Turing.Inference.init_strategy(spl),
-    discard_sample = false,
+    discard_sample=false,
     kwargs...,
 )
-    vis = DynamicPPL.VarInfo(model)
-    _, vis = DynamicPPL.init!!(rng, model, vis, initial_params)
- 
-    # vis = DynamicPPL.default_varinfo(rng, model, spl)
-
-    # # If there are initial parameters, set them and the logdensity
-    # if initial_params !== nothing
-    #     vis = DynamicPPL.initialize_parameters!!(vis, initial_params, model)
-    #     vis = last(DynamicPPL.evaluate!!(model, vis))
-    # end    # Link the variables
-
-    DynamicPPL.link!!(vis, model)
-    DynamicPPL.evaluate!!(model, vis)
-
-    # Get the log density of the current parameters
-    lp_old = DynamicPPL.getlogjoint_internal(vis)
-
-    # Create a transition object in case of rejection
-    prev_transition = DynamicPPL.ParamsWithStats(vis, model)
-
-    # Get the parameters of interest and create the covariance matrix
-    theta = vis[:]
-    Σ = diagm(0.01 .* abs.(theta) .+ 1e-6)
-
-    orig_state = init_AMGSSGSState(prev_transition, vis, theta, Σ, spl) 
-    # Propose a new set of parameters and grab the log density
-    proposal_state = propose_amgs(rng, vis, model, spl, orig_state, Σ)
-    lp_proposal = proposal_state.logjoint_internal
-
-    # Check whether to accept the new parameters 
-    accep = mh_accept_logdens(rng, lp_proposal, lp_old)
-
-    # Construct the transition object to be returned
-    new_trans = accep ? proposal_state.transition : prev_transition
-
-    # Update the kernel and return the new transition and state
-    prob = exp(min(0.0, (lp_proposal - lp_old)))
-    _, upd_state = update_kernel(rng, accep ? proposal_state : orig_state, new_trans, spl, prob)
-    return_transition = discard_sample ? nothing : new_trans
-    return return_transition, upd_state
+    state = _sgs_initial_state(rng, model, spl, initial_params)
+    return _sgs_step!(rng, state, spl, state.kernel, 1.0, discard_sample)
 end
 
-"""
-    AbstractMCMC.step(rng::AbstractRNG, model::DynamicPPL.Model, spl::AMGS_SGS_Sampler, state::AMGSSGSState; initial_params=nothing, kwargs...)
-
-Perform a sampling step for the AMGSSGS sampler given a state.
-
-# Arguments
-- `rng::AbstractRNG`: The random number generator.
-- `model::DynamicPPL.Model`: The model.
-- `spl::AMGS_SGS_Sampler`: The AMGSSGS sampler.
-- `state::AMGSSGSState`: The current state of the sampler.
-- `kwargs...`: Additional keyword arguments.
-"""
 function AbstractMCMC.step(
     rng::AbstractRNG,
-    model::AbstractMCMC.AbstractModel,
+    model::DynamicPPL.Model,
     spl::AMGS_SGS_Sampler,
     state::AMGSSGSState;
-    discard_sample = false,
-    kwargs...
+    discard_sample=false,
+    kwargs...,
 )
-    vis = state.varinfo
-    lp_old = state.logjoint_internal
-    # Propose the new parameters and grab the log density
-    proposal_state = propose_amgs(rng, vis, model, spl, state, exp(state.global_scale_adaptation_state.β) .* state.kernel)
-    lp_proposal = proposal_state.logjoint_internal
-
-    # Check whether to accept the new parameters
-    accep = mh_accept_logdens(rng, lp_proposal, lp_old)
-
-    # Construct the transition object to be returned
-    new_trans = accep ? proposal_state.transition : state.transition 
-
-    # Update the kernel and return the new transition and state
-    prob = exp(min(0.0, (lp_proposal - lp_old)))
-    _, new_state = update_kernel(rng, accep ? proposal_state : state, new_trans, spl, prob)
-    return_transition = discard_sample ? nothing : new_trans
-    return return_transition, new_state
+    return _sgs_step!(rng, state, spl, state.kernel, exp(state.β), discard_sample)
 end
 
+####
+#### Gibbs interface
+####
 
-# Define assume functions for the AMGSSGS sampler
-# function DynamicPPL.assume(
-#     rng::Random.AbstractRNG, spl::AMGS_SGS_Sampler, dist::Distribution, vn::DynamicPPL.VarName, vi
-# )
-#     return DynamicPPL.assume(dist, vn, vi)
-# end
+function Turing.Inference.gibbs_update_state!!(
+    ::AMGS_SGS_Sampler,
+    state::AMGSSGSState,
+    model::DynamicPPL.Model,
+    global_vals::DynamicPPL.VarNamedTuple,
+)
+    new_ldf, θ, logp, transition = gibbs_rebuild(state, model, global_vals)
+    return AMGSSGSState(
+        new_ldf,
+        transition,
+        θ,
+        logp,
+        state.μ,
+        state.kernel,
+        state.step,
+        state.β,
+        state.global_scale_adaptation_state,
+        state.Δ_cache,
+        state.θ_prop,
+        state.z_cache,
+    )
+end
 
-# Define function to get log evidence
 getlogevidence(transitions, sampler::AMGS_SGS_Sampler, state) = missing
-
-"""
-    AbstractMCMC.bundle_samples(ts::Vector{<:DynamicPPL.ParamsWithStats}, model::AbstractMCMC.AbstractModel, spl::AMGS_SGS_Sampler, state, chain_type::Type{MCMCChains.Chains}; save_state=false, stats=missing, sort_chain=false, include_varname_to_symbol=true, discard_initial=0, thinning=1, kwargs...)
-
-Bundle the samples from the AMGSSGS sampler into an MCMCChains Chain.
-
-# Arguments
-- `ts::Vector{<:DynamicPPL.ParamsWithStats}`: The Vector of transitions.
-- `model::AbstractMCMC.AbstractModel`: The model.
-- `spl::AMGS_SGS_Sampler`: The AMGSSGS sampler.
-- `state`: The current state of the sampler.
-- `chain_type::Type{MCMCChains.Chains}`: The type of chain.
-- `save_state`: Whether to save the state (default: false).
-- `stats`: The statistics (default: missing).
-- `sort_chain`: Whether to sort the chain (default: false).
-- `include_varname_to_symbol`: Whether to include variable name to symbol mapping (default: true).
-- `discard_initial`: The number of initial samples to discard (default: 0).
-- `thinning`: The thinning interval (default: 1).
-- `kwargs...`: Additional keyword arguments.
-"""
-# function AbstractMCMC.bundle_samples(
-#     ts::Vector{<:DynamicPPL.ParamsWithStats},
-#     model::AbstractMCMC.AbstractModel,
-#     spl::AMGS_SGS_Sampler,
-#     state,
-#     chain_type::Type{MCMCChains.Chains};
-#     save_state=false,
-#     stats=missing,
-#     sort_chain=false,
-#     include_varname_to_symbol=true,
-#     discard_initial=0,
-#     thinning=1,
-#     kwargs...,
-# )
-# 
-#     # Convert transitions to array format.
-#     # Also retrieve the variable names.
-#     varnames, vals = _params_to_array(model, ts)
-#     varnames_symbol = map(Symbol, varnames)
-# 
-#     # Get the values of the extra parameters in each transition.
-#     extra_params, extra_values = Turing.Inference.get_transition_extras(ts)
-# 
-#     # Extract names & construct param array.
-#     nms = [varnames_symbol; extra_params]
-#     parray = hcat(vals, extra_values)
-# 
-#     # Get the average or final log evidence, if it exists.
-#     le = getlogevidence(ts, spl, state)
-# 
-#     # Set up the info tuple.
-#     info = NamedTuple()
-# 
-#     if include_varname_to_symbol
-#         info = merge(info, (varname_to_symbol=OrderedDict(zip(varnames, varnames_symbol)),))
-#     end
-# 
-#     if save_state
-#         info = merge(info, (model=model, sampler=spl, samplerstate=state))
-#     end
-# 
-#     # Merge in the timing info, if available
-#     if !ismissing(stats)
-#         info = merge(info, (start_time=stats.start, stop_time=stats.stop))
-#     end
-# 
-#     # Conretize the array before giving it to MCMCChains.
-#     parray = MCMCChains.concretize(parray)
-# 
-#     # Chain construction.
-#     chain = MCMCChains.Chains(
-#         parray,
-#         nms,
-#         (internals=extra_params,);
-#         evidence=le,
-#         info=info,
-#         start=discard_initial + 1,
-#         thin=thinning,
-#     )
-# 
-#     return sort_chain ? sort(chain) : chain
-# end
-# 

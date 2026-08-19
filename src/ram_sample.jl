@@ -1,9 +1,54 @@
-# write functions step and step_warmup which are used in the RAM_sampler.
-# Using the algorithm constructed in https://arxiv.org/abs/1011.4381
+"""
+ram_sample.jl
 
-# Start by defining the sampler
+Robust Adaptive Metropolis (RAM), Vihola (2012), https://arxiv.org/abs/1011.4381.
 
-struct RAM_Sampler{T_accep <: Real, T_conv_step <: Real, T_lb_eig <: Real, T_ub_eig <: Real} <: AbstractMCMC.AbstractSampler
+RAM differs structurally from the other samplers here. Instead of adapting a
+covariance `Σ` and a separate global scale `exp(β)`, it adapts the Cholesky
+factor `S` of the proposal covariance directly, with a single rank-one update
+per iteration:
+
+    S_{n+1} S_{n+1}ᵀ = S_n (I + η_n (α_n - α*) UUᵀ / ‖U‖²) S_nᵀ
+
+where `U ~ N(0, I)` is the standard normal draw that generated the proposal
+`θ' = θ + S_n U`, `α_n` is the realised acceptance probability and `α*` the
+target. The shape and the scale are therefore learned together, and the scheme
+provably drives the acceptance rate to `α*` without needing to estimate the
+target's mean.
+
+Because the update is rank one, it is applied with `lowrankupdate` /
+`lowrankdowndate` on the Cholesky factor rather than by re-factorising, which is
+`O(d²)` per iteration instead of `O(d³)`. Expanding the recursion shows why the
+update vector is `√(η|α-α*|) · S U / ‖U‖`:
+
+    S (I ± c UUᵀ/‖U‖²) Sᵀ = S Sᵀ ± c (S U)(S U)ᵀ / ‖U‖²
+
+so a rank-one update with that vector reproduces the recursion exactly.
+"""
+
+"""
+    RAM_Sampler(acceptance_rate, convergence_step; lb_eig=-Inf, ub_eig=Inf, bound_eigs=false)
+
+Robust Adaptive Metropolis sampler.
+
+# Fields
+- `acceptance_rate::Real`: target acceptance rate `α*`.
+- `convergence_step::Real`: decay exponent `γ` of the gain `η = (t+1)^(-γ)`.
+- `lb_eig::Real`, `ub_eig::Real`: bounds on the eigenvalues of the proposal
+  covariance, applied only when `bound_eigs` is true.
+- `bound_eigs::Bool`: if true, an update that would push any eigenvalue of the
+  proposal covariance outside `[lb_eig, ub_eig]` is rejected and the previous
+  factor retained. This guards against the adaptation collapsing or exploding on
+  badly conditioned targets, at the cost of an eigendecomposition per iteration.
+
+# Example
+```julia
+spl = RAM_Sampler(0.234, 0.6)
+spl = RAM_Sampler(0.234, 0.6; lb_eig=1e-8, ub_eig=1e8, bound_eigs=true)
+```
+"""
+struct RAM_Sampler{T_accep<:Real,T_conv_step<:Real,T_lb_eig<:Real,T_ub_eig<:Real} <:
+       AbstractMCMC.AbstractSampler
     acceptance_rate::T_accep
     convergence_step::T_conv_step
     lb_eig::T_lb_eig
@@ -11,479 +56,272 @@ struct RAM_Sampler{T_accep <: Real, T_conv_step <: Real, T_lb_eig <: Real, T_ub_
     bound_eigs::Bool
 end
 
-"""
-    RAM_Sampler(acceptance_rate::T1, convergence_step::T2, space::Tuple; lb_eig::T3 = -Inf, ub_eig::T4 = Inf, bound_eigs::Bool = false) where {T1 <: Real, T2 <: Real, T3 <: Real, T4 <: Real}
-
-Create a new RAM sampler with the specified acceptance rate, convergence step, and space.
-
-# Arguments
-- `acceptance_rate::T1`: The target acceptance rate for the sampler.
-- `convergence_step::T2`: A tuning parameter for the rate of convergence/step size of the sampler.
-- `lb_eig::T3`: The lower bound for the eigenvalues for the acceptance of the kernel (default: -Inf).
-- `ub_eig::T4`: The upper bound for the eigenvalues for the acceptance of the kernel (default: Inf).
-- `bound_eigs::Bool`: Whether to bound the eigenvalues (default: false).
-"""
 function RAM_Sampler(
     acceptance_rate::T1,
     convergence_step::T2;
-) where {T1 <: Real, T2 <: Real}
-    return RAM_Sampler{T1, T2, Float64, Float64}(acceptance_rate, convergence_step, -Inf, Inf, false)
+    lb_eig::Real=-Inf,
+    ub_eig::Real=Inf,
+    bound_eigs::Bool=false,
+) where {T1<:Real,T2<:Real}
+    lb_eig < ub_eig || throw(ArgumentError("lb_eig must be below ub_eig"))
+    return RAM_Sampler(acceptance_rate, convergence_step, lb_eig, ub_eig, bound_eigs)
 end
 
-# DynamicPPL.default_chain_type(sampler::RAM_Sampler) = MCMCChains.Chains
-
-# Define the state of the sampler
-# Contains Important quantities for computation of the updated kernel
 """
     RAMState
 
-State container used by the RAM (Robust Adaptive Metropolis) sampler to store running statistics
-required for adaptation using Cholesky-based proposals.
+State for [`RAM_Sampler`](@ref).
 
 # Fields
-- `transition`: the latest `DynamicPPL.ParamsWithStats` object.
-- `varinfo`: the `VarInfo` corresponding to the current parameter values.
-- `kernel`: Cholesky factor of the running covariance matrix used for proposals.
-- `step`: integer step counter for adaptation scheduling.
-- `logjoint_internal`: cached log joint density for the current state.
+- `ldf`: `LogDensityFunction` over the linked parameter vector.
+- `transition`: cached transition for the current position.
+- `θ`: current position in linked space.
+- `logp`: cached log-density at `θ`.
+- `kernel`: the `Cholesky` factorisation of the proposal covariance. Unlike the
+  other samplers this *is* the adapted object — there is no separate `Σ` and no
+  global scale `β`.
+- `step`: iteration counter driving the gain `η`.
+- `θ_prop`, `z_cache`: preallocated proposal and standard-normal buffers.
 """
 struct RAMState{
+    TLDF<:DynamicPPL.LogDensityFunction,
     TTrans<:DynamicPPL.ParamsWithStats,
-    TVI<:AbstractVarInfo,
+    Tθ<:AbstractVector,
     TKernel<:Cholesky,
     TStep<:Integer,
     TL<:Real,
-}
+} <: AbstractAMGSState
+    ldf::TLDF
     transition::TTrans
-    varinfo::TVI
+    θ::Tθ
+    logp::TL
     kernel::TKernel
     step::TStep
-    logjoint_internal::TL
+    θ_prop::Tθ
+    z_cache::Tθ
 end
 
-# Define the initial state of the sampler
 """
-    init_RAMState(transition::T_trans, kernel::T_kernel) where {T_trans <: AdvancedMH.AbstractTransition, T_kernel <: Cholesky}
+    init_RAMState(ldf, transition, θ, logp, kernel)
 
-Initialize the state of the RAM sampler with the given transition and kernel matrix.
-
-# Arguments
-- `transition::T_trans`: The initial transition object.
-- `kernel::T_kernel`: The initial kernel matrix.
+Build the initial RAM state, allocating the proposal buffers once.
 """
 function init_RAMState(
-    transition::T_trans,
-    varinfo::TVI,
-    kernel::T_kernel,
-) where {T_trans <: DynamicPPL.ParamsWithStats, TVI<:AbstractVarInfo, T_kernel <: Cholesky}
-    # Initialize step
-    step = 1
-    # Initialize log joint density
-    DynamicPPL.getlogjoint_internal(varinfo)
-    RAMState{T_trans, TVI, T_kernel, Int, typeof(lp)}(transition, varinfo, kernel, step, lp)
+    ldf::DynamicPPL.LogDensityFunction,
+    transition::DynamicPPL.ParamsWithStats,
+    θ::AbstractVector,
+    logp::Real,
+    kernel::Cholesky,
+)
+    return RAMState(ldf, transition, θ, logp, kernel, 1, similar(θ), similar(θ))
 end
 
-# Write a function which updates the kernel
 """
-    update_kernel(state::RAMState, trans::DynamicPPL.ParamsWithStats, U::T, spl::RAM_Sampler, prob::T3) where {T <: Vector, T3 <: Real}
+    update_kernel(state, U, spl, prob)
 
-Update the kernel matrix of the RAM sampler state based on the new transition and acceptance probability.
+Apply Vihola's rank-one update to the Cholesky factor and return the new factor.
 
-# Arguments
-- `state::RAMState`: The current state of the sampler.
-- `trans::DynamicPPL.ParamsWithStats`: The new transition object.
-- `U::T`: The proposed update vector.
-- `spl::RAM_Sampler`: The RAM sampler.
-- `prob::T3`: The acceptance probability.
+`U` must be the standard normal draw that generated the accepted-or-rejected
+proposal, and `prob` the realised acceptance probability. The sign of
+`prob - α*` decides whether the factor is updated (proposal too conservative,
+widen) or downdated (too aggressive, shrink).
+
+A downdate can make the matrix numerically indefinite, in which case
+`lowrankdowndate` throws; the previous factor is then retained, which keeps the
+chain valid rather than aborting the run.
 """
-function update_kernel(state::RAMState, trans::DynamicPPL.ParamsWithStats, U::T, spl::RAM_Sampler, prob::T3) where {T <: Vector, T3 <: Real}
-    # Grab useful quantities from the state
+function update_kernel(state::RAMState, U::AbstractVector, spl::RAM_Sampler, prob::Real)
     S = state.kernel
-    step = state.step
+    nrm = norm(U)
 
-    # Follow maths from the paper to update the kernel
-    # Do this via the Cholesky update and downdate to simplify calculations
-    η = (step + 1.0)^(-spl.convergence_step)
-    accepdiff = (prob - spl.acceptance_rate)
-    β = sqrt(η * abs(accepdiff)) * S.L * U / norm(U)
+    # Degenerate draw: no direction to update along.
+    iszero(nrm) && return S
 
-    S = if sign(accepdiff) == 1
-        LinearAlgebra.lowrankupdate(S, β)
-    else
-        LinearAlgebra.lowrankdowndate(S, β)
+    η = (state.step + 1.0)^(-spl.convergence_step)
+    accepdiff = prob - spl.acceptance_rate
+    v = sqrt(η * abs(accepdiff)) .* (S.L * U) ./ nrm
+
+    S_new = try
+        if accepdiff >= 0
+            LinearAlgebra.lowrankupdate(S, v)
+        else
+            LinearAlgebra.lowrankdowndate(S, v)
+        end
+    catch err
+        # A downdate that would destroy positive definiteness: keep the old
+        # factor rather than propagating a broken kernel.
+        err isa LinearAlgebra.PosDefException || rethrow()
+        return S
     end
 
-    # Bound the eigenvalues if required
+    # Optionally reject updates that push the covariance's eigenvalues outside
+    # the configured band. Note the eigenvalues wanted are those of the
+    # covariance S*Sᵀ, not of the triangular factor.
     if spl.bound_eigs
-        S = ifelse(
-            all(x -> spl.lb_eig <= x <= spl.ub_eig, LinearAlgebra.eigvals(S)),
-            S,
-            state.kernel
-        )
+        λ = eigvals(Symmetric(Matrix(S_new)))
+        all(x -> spl.lb_eig <= x <= spl.ub_eig, λ) || return S
     end
 
-    new_state = RAMState(trans, state.varinfo, S, step + 1, state.logjoint_internal)
-    return new_state
+    return S_new
 end
 
+####
+#### Sampler interface
+####
 
-# Function to set the new parameters (for use with gibbs sampler)
-Turing.Inference.isgibbscomponent(::RAM_Sampler) = true 
-
+Turing.Inference.isgibbscomponent(::RAM_Sampler) = true
 Turing.Inference.init_strategy(::RAM_Sampler) = DynamicPPL.InitFromPrior()
 
-# Get varinfo
-function Turing.Inference.get_varinfo(state::T) where {T<:RAMState}
-    return state.varinfo
+"""
+    propose_ram!(rng, state)
+
+Draw `U ~ N(0, I)` and form the proposal `θ' = θ + S U` in the preallocated
+buffers, returning `(θ', U, log π(θ'))`.
+
+`U` is returned because the RAM adaptation is expressed in terms of the standard
+normal draw, not the proposal increment.
+"""
+function propose_ram!(rng::AbstractRNG, state::RAMState)
+    U = state.z_cache
+    θ_prop = state.θ_prop
+    randn!(rng, U)
+
+    copyto!(θ_prop, U)
+    lmul!(LowerTriangular(state.kernel.L), θ_prop)   # θ_prop = S U
+    @inbounds @simd for i in eachindex(θ_prop)
+        θ_prop[i] += state.θ[i]
+    end
+
+    return θ_prop, U, LogDensityProblems.logdensity(state.ldf, θ_prop)
 end
 
+function _ram_initial_state(rng::AbstractRNG, model::DynamicPPL.Model, initial_params)
+    ldf = build_ldf(model, rng, initial_params)
+    θ = initial_theta(ldf)
+    logp = LogDensityProblems.logdensity(ldf, θ)
+    transition = DynamicPPL.ParamsWithStats(θ, ldf, (; accepted=true))
+    S = cholesky(Symmetric(initial_kernel(θ)))
+    return init_RAMState(ldf, transition, θ, logp, S)
+end
 
-function Turing.Inference.setparams_varinfo!!(
-    model::DynamicPPL.Model,
-    sampler::RAM_Sampler,
-    state::RAMState,
-    params::AbstractVarInfo,
+"""
+    _ram_step!(rng, state, spl, discard_sample)
+
+One RAM iteration: propose along the current Cholesky factor, accept or reject,
+then apply the rank-one adaptation.
+"""
+function _ram_step!(
+    rng::AbstractRNG, state::RAMState, spl::RAM_Sampler, discard_sample::Bool
 )
-    # Update the vi
-    #vi = state.varinfo
-    #vi = DynamicPPL.unflatten(vi, params[:])
-    vi  = last(DynamicPPL.evaluate!!(model, params)) 
+    θ_prop, U, lp_prop = propose_ram!(rng, state)
+    lp_old = state.logp
 
-    lp = DynamicPPL.getlogjoint_internal(vi)
-    # #update the model state
-    new_transition = DynamicPPL.ParamsWithStats(vi, model)
-    new_state = RAMState(new_transition, vi, state.kernel, state.step, lp)
-    
-    # Update the VarInfo with the new log density
-    return new_state
+    accep = mh_accept_logdens(rng, lp_prop, lp_old)
+    prob = exp(min(0.0, lp_prop - lp_old))
+    logp = lp_old
+    if accep
+        copyto!(state.θ, θ_prop)
+        logp = lp_prop
+    end
+
+    S = update_kernel(state, U, spl, prob)
+
+    moved = RAMState(
+        state.ldf,
+        state.transition,
+        state.θ,
+        logp,
+        S,
+        state.step + 1,
+        state.θ_prop,
+        state.z_cache,
+    )
+
+    # Keep the transition cache consistent with the position regardless of
+    # `discard_sample`, which only suppresses what is returned.
+    transition = accep ? make_transition(moved, true) : reuse_transition(moved, false)
+
+    new_state = RAMState(
+        moved.ldf,
+        transition,
+        moved.θ,
+        moved.logp,
+        moved.kernel,
+        moved.step,
+        moved.θ_prop,
+        moved.z_cache,
+    )
+
+    return (discard_sample ? nothing : transition), new_state
 end
 
-
-# Write a function which proposes a new set of parameters
-"""
-    propose_RAM(rng::T_rng, vi::AbstractVarInfo, model::DynamicPPL.Model, spl::RAM_Sampler, S::T) where {T_rng <: AbstractRNG, T <: Cholesky}
-
-Propose a new set of parameters for the RAM sampler.
-
-# Arguments
-- `rng::T_rng`: The random number generator.
-- `vi::AbstractVarInfo`: The variable information.
-- `model::DynamicPPL.Model`: The model.
-- `spl::RAM_Sampler`: The RAM sampler.
-- `S::T`: The Cholesky decomposition of the covariance matrix.
-"""
-function propose_RAM(
-    rng::T_rng,
-    vi::AbstractVarInfo,
-    model::DynamicPPL.Model,
-    spl::RAM_Sampler,
-    state::RAMState,
-    S::T
-) where {T_rng <: AbstractRNG, T <: Cholesky}
-    # Grab the parameters we are performing inference on
-    θ = vi[:]
-
-    # Propose a new set of parameters
-    proposal, U = proposewalkram(rng, θ, S.L)
-    # Set the new parameters in the VarInfo
-    proposal_vi = DynamicPPL.unflatten(vi, proposal)
-
-    # Call a function to update the varinfo and evaluate the logdensity
-    return Turing.Inference.setparams_varinfo!!(model, spl, state, proposal_vi), U
-end
-
-# Write a function which initialises the chain where there are warmup steps
-"""
-    AbstractMCMC.step_warmup(rng::AbstractRNG, model::DynamicPPL.Model, spl::RAM_Sampler; initial_params=nothing, kwargs...)
-
-Perform an initial warmup step for the RAM sampler.
-
-# Arguments
-- `rng::AbstractRNG`: The random number generator.
-- `model::DynamicPPL.Model`: The model.
-- `spl::RAM_Sampler`: The RAM sampler.
-- `initial_params`: The initial parameters (optional).
-- `kwargs...`: Additional keyword arguments.
-"""
 function AbstractMCMC.step_warmup(
     rng::AbstractRNG,
     model::DynamicPPL.Model,
     spl::RAM_Sampler;
-    initial_params = Turing.Inference.init_strategy(spl),
-    discard_sample = false,
+    initial_params=Turing.Inference.init_strategy(spl),
+    discard_sample=false,
     kwargs...,
 )
-    vis = DynamicPPL.VarInfo(model)
-    _, vis = DynamicPPL.init!!(rng, model, vis, initial_params)
-    # If we're doing random walk with a covariance matrix,
-    # just link everything before sampling.
-    # vis = DynamicPPL.default_varinfo(rng, model, spl)
-
-    # # If there are initial parameters, set them and the logdensity
-    # if initial_params !== nothing
-    #     vis = DynamicPPL.initialize_parameters!!(vis, initial_params, model)
-    #     vis = last(DynamicPPL.evaluate!!(model, vis))
-    # end
-
-    # Link the variables
-    DynamicPPL.link!!(vis, model)
-    DynamicPPL.evaluate!!(model, vis)
-
-    # Get the log density of the current parameters
-    lp_old = DynamicPPL.getlogjoint_internal(vis)
-    prev_transition = DynamicPPL.ParamsWithStats(vis, model)
-
-    # Get the parameters of interest and create the covariance matrix
-    theta = vis[:]
-    S = cholesky(0.01 .* abs.(diagm(theta)) + (1e-6 * I))
-
-    # get the old state
-    orig_state = RAMState(prev_transition, vis, S, 1, lp_old)
-
-    # Propose a new set of parameters and grab the log density
-    new_state, _ = propose_RAM(rng, vis, model, spl, orig_state, S)
-    lp_proposal = new_state.logjoint_internal
-
-    # Check whether to accept the new parameters and return the previous transition if not
-    accep = mh_accept_logdens(rng, lp_proposal, lp_old)
-    return_transition = discard_sample ? nothing : (accep ? new_state.transition : prev_transition)
-    
-    return return_transition, accep ? new_state : orig_state
+    state = _ram_initial_state(rng, model, initial_params)
+    return _ram_step!(rng, state, spl, discard_sample)
 end
 
-"""
-    AbstractMCMC.step_warmup(rng::AbstractRNG, model::DynamicPPL.Model, spl::RAM_Sampler, state::RAMState; initial_params=nothing, kwargs...)
-
-Perform a warmup step for the RAM sampler for a given state.
-
-# Arguments
-- `rng::AbstractRNG`: The random number generator.
-- `model::DynamicPPL.Model`: The model.
-- `spl::RAM_Sampler`: The RAM sampler.
-- `state::RAMState`: The current state of the sampler.
-- `kwargs...`: Additional keyword arguments.
-"""
 function AbstractMCMC.step_warmup(
     rng::AbstractRNG,
     model::DynamicPPL.Model,
     spl::RAM_Sampler,
     state::RAMState;
-    discard_sample = false,
-    kwargs...
+    discard_sample=false,
+    kwargs...,
 )
-    # Grab the VarInfo and logdensity of the current parameters
-    vis = state.varinfo
-    lp_old = state.logjoint_internal
-
-    # Get the kernel
-    S = state.kernel
-
-    # Propose the new parameters and get the log density
-    proposal_state, _ = propose_RAM(rng, vis, model, spl, state, S)
-    lp_proposal = proposal_state.logjoint_internal
-
-    # Check whether to accept the new parameters and return the previous transition if not
-    accep = mh_accept_logdens(rng, lp_proposal, lp_old)
-    # Create a new transition and state object if accepted
-    # trans = DynamicPPL.ParamsWithStats(vis, lp_proposal, true)
-    # new_state = RAMState(trans, S, state.step)
-    return_transition = discard_sample ? nothing : (accep ? proposal_state.transition : state.transition)
-    return return_transition, accep ? proposal_state : state
+    return _ram_step!(rng, state, spl, discard_sample)
 end
 
-"""
-    AbstractMCMC.step(rng::AbstractRNG, model::DynamicPPL.Model, spl::RAM_Sampler; initial_params=nothing, kwargs...)
-
-Perform an initial sampling step for the RAM sampler.
-
-# Arguments
-- `rng::AbstractRNG`: The random number generator.
-- `model::DynamicPPL.Model`: The model.
-- `spl::RAM_Sampler`: The RAM sampler.
-- `initial_params`: The initial parameters (optional).
-- `kwargs...`: Additional keyword arguments.
-"""
 function AbstractMCMC.step(
     rng::AbstractRNG,
     model::DynamicPPL.Model,
     spl::RAM_Sampler;
-    initial_params = Turing.Inference.init_strategy(spl),
-    discard_sample = false,
+    initial_params=Turing.Inference.init_strategy(spl),
+    discard_sample=false,
     kwargs...,
 )
-    vis = DynamicPPL.VarInfo(model)
-    _, vis = DynamicPPL.init!!(rng, model, vis, initial_params)
-    # If we're doing random walk with a covariance matrix,
-    # just link everything before sampling.
-    # vis = DynamicPPL.default_varinfo(rng, model, spl)
-
-    # # If there are initial parameters, set them and the logdensity
-    # if initial_params !== nothing
-    #     vis = DynamicPPL.initialize_parameters!!(vis, initial_params, model)
-    #     vis = last(DynamicPPL.evaluate!!(model, vis))
-    # end    # Link the variables
-
-    DynamicPPL.link!!(vis, model)
-    DynamicPPL.evaluate!!(model, vis)
-
-    # Get the log density of the current parameters
-    lp_old = DynamicPPL.getlogjoint_internal(vis)
-
-    # Create a transition object in case of rejection
-    prev_transition = DynamicPPL.ParamsWithStats(vis, model)
-
-    # Get the parameters of interest and create the covariance matrix
-    theta = vis[:]
-    S = cholesky(0.01 .* abs.(diagm(theta)) + (1e-6 * I))
-
-    # Get the old state
-    orig_state = RAMState(prev_transition, vis, S, 1, lp_old)
-
-    # Propose a new set of parameters and grab the log density
-    proposal_state, U = propose_RAM(rng, vis, model, spl, orig_state, S)
-    lp_proposal = proposal_state.logjoint_internal
-
-    # Check whether to accept the new parameters 
-    accep = mh_accept_logdens(rng, lp_proposal, lp_old)
-
-    # Construct the transition object to be returned
-    new_trans = accep ? proposal_state.transition : prev_transition
-
-    # Update the kernel and return the new transition and state
-    prob = exp(min(0.0, -(lp_proposal - lp_old)))
-    upd_state = update_kernel(accep ? proposal_state : orig_state, new_trans, U, spl, prob)
-    return_transition = discard_sample ? nothing : new_trans
-    return return_transition, upd_state
+    state = _ram_initial_state(rng, model, initial_params)
+    return _ram_step!(rng, state, spl, discard_sample)
 end
 
-"""
-    AbstractMCMC.step(rng::AbstractRNG, model::DynamicPPL.Model, spl::RAM_Sampler, state::RAMState; initial_params=nothing, kwargs...)
-
-Perform a sampling step for the RAM sampler given a state.
-
-# Arguments
-- `rng::AbstractRNG`: The random number generator.
-- `model::DynamicPPL.Model`: The model.
-- `spl::RAM_Sampler`: The RAM sampler.
-- `state::RAMState`: The current state of the sampler.
-- `kwargs...`: Additional keyword arguments.
-"""
 function AbstractMCMC.step(
     rng::AbstractRNG,
     model::DynamicPPL.Model,
     spl::RAM_Sampler,
     state::RAMState;
-    discard_sample = false,
+    discard_sample=false,
     kwargs...,
 )
-    vis = state.varinfo
-    lp_old = state.logjoint_internal
-
-    # Propose the new parameters and grab the log density
-    proposal_state, U = propose_RAM(rng, vis, model, spl, state, state.kernel)
-    lp_proposal = proposal_state.logjoint_internal
-
-    # Check whether to accept the new parameters
-    accep = mh_accept_logdens(rng, lp_proposal, lp_old)
-
-    # Construct the transition object to be returned
-    new_trans = accep ? proposal_state.transition : state.transition
-
-    # Update the kernel and return the new transition and state
-    prob = exp(min(0.0, (lp_proposal - lp_old)))
-    new_state = update_kernel(accep ? proposal_state : state, new_trans, U, spl, prob)
-    return_transition = discard_sample ? nothing : new_trans
-    return return_transition, new_state
+    return _ram_step!(rng, state, spl, discard_sample)
 end
 
-# Define assume functions for the RAM sampler
-#function DynamicPPL.assume(
-#    rng::Random.AbstractRNG, spl::RAM_Sampler, dist::Distribution, vn::DynamicPPL.VarName, vi
-#)
-#    # DynamicPPL.updategid!(vi, vn, spl)
-#    return DynamicPPL.assume(dist, vn, vi)
-#end
+####
+#### Gibbs interface
+####
 
-# Define function to get log evidence
+function Turing.Inference.gibbs_update_state!!(
+    ::RAM_Sampler,
+    state::RAMState,
+    model::DynamicPPL.Model,
+    global_vals::DynamicPPL.VarNamedTuple,
+)
+    new_ldf, θ, logp, transition = gibbs_rebuild(state, model, global_vals)
+    return RAMState(
+        new_ldf,
+        transition,
+        θ,
+        logp,
+        state.kernel,
+        state.step,
+        state.θ_prop,
+        state.z_cache,
+    )
+end
+
 getlogevidence(transitions, sampler::RAM_Sampler, state) = missing
-
-"""
-    AbstractMCMC.bundle_samples(ts::Vector{<:DynamicPPL.ParamsWithStats}, model::DynamicPPL.Model, spl::RAM_Sampler, state, chain_type::Type{MCMCChains.Chains}; save_state=false, stats=missing, sort_chain=false, include_varname_to_symbol=true, discard_initial=0, thinning=1, kwargs...)
-
-Bundle the samples from the RAM sampler into an MCMCChains Chain.
-
-# Arguments
-- `ts::Vector{<:DynamicPPL.ParamsWithStats}`: The Vector of transitions.
-- `model::DynamicPPL.Model`: The model.
-- `spl::RAM_Sampler`: The RAM sampler.
-- `state`: The current state of the sampler.
-- `chain_type::Type{MCMCChains.Chains}`: The type of chain.
-- `save_state`: Whether to save the state (default: false).
-- `stats`: The statistics (default: missing).
-- `sort_chain`: Whether to sort the chain (default: false).
-- `include_varname_to_symbol`: Whether to include variable name to symbol mapping (default: true).
-- `discard_initial`: The number of initial samples to discard (default: 0).
-- `thinning`: The thinning interval (default: 1).
-- `kwargs...`: Additional keyword arguments.
-"""
-# function AbstractMCMC.bundle_samples(
-#     ts::Vector{<:DynamicPPL.ParamsWithStats},
-#     model::DynamicPPL.Model,
-#     spl::RAM_Sampler,
-#     state,
-#     chain_type::Type{MCMCChains.Chains};
-#     save_state=false,
-#     stats=missing,
-#     sort_chain=false,
-#     include_varname_to_symbol=true,
-#     discard_initial=0,
-#     thinning=1,
-#     kwargs...,
-# )
-#     # Convert transitions to array format.
-#     # Also retrieve the variable names.
-#     varnames, vals = _params_to_array(model, ts)
-#     varnames_symbol = map(Symbol, varnames)
-# 
-#     # Get the values of the extra parameters in each transition.
-#     extra_params, extra_values = Turing.Inference.get_transition_extras(ts)
-# 
-#     # Extract names & construct param array.
-#     nms = [varnames_symbol; extra_params]
-#     parray = hcat(vals, extra_values)
-# 
-#     # Get the average or final log evidence, if it exists.
-#     le = getlogevidence(ts, spl, state)
-# 
-#     # Set up the info tuple.
-#     info = NamedTuple()
-# 
-#     if include_varname_to_symbol
-#         info = merge(info, (varname_to_symbol=OrderedDict(zip(varnames, varnames_symbol)),))
-#     end
-# 
-#     if save_state
-#         info = merge(info, (model=model, sampler=spl, samplerstate=state))
-#     end
-# 
-#     # Merge in the timing info, if available
-#     if !ismissing(stats)
-#         info = merge(info, (start_time=stats.start, stop_time=stats.stop))
-#     end
-# 
-#     # Conretize the array before giving it to MCMCChains.
-#     parray = MCMCChains.concretize(parray)
-# 
-#     # Chain construction.
-#     chain = MCMCChains.Chains(
-#         parray,
-#         nms,
-#         (internals=extra_params,);
-#         evidence=le,
-#         info=info,
-#         start=discard_initial + 1,
-#         thin=thinning,
-#     )
-# 
-#     return sort_chain ? sort(chain) : chain
-# end
